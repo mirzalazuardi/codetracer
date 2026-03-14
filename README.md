@@ -468,6 +468,9 @@ Yes. `.ts` and `.tsx` files are included under `--lang js` and `--lang all`. Typ
 - [ ] JSON/YAML config file (`.codetracerrc`)
 - [ ] `--out json` for programmatic consumption
 - [ ] Shell completions (bash, zsh, fish)
+- [ ] Tree-sitter integration for AST-based precision (if demanded — see below)
+
+> **On tree-sitter:** We've evaluated adding tree-sitter for AST-accurate parsing. The current regex approach covers ~90% of cases while keeping codetracer a single zero-dependency bash file. Tree-sitter would require a host language rewrite (Python/Node/Rust) and per-language grammar installs — a fundamentally different tool. We'll revisit if there's enough demand via GitHub issues.
 
 Want something on this list sooner? Open an issue or a PR.
 
