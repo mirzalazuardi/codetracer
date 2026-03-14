@@ -299,6 +299,9 @@ ${BOLD}EXAMPLES${RESET}
   # Trace a route through the full request lifecycle
   codetracer --route "POST /orders/:id/refund" ./app
 
+  # Trace from a curl file (extracts verb, path, query/body params)
+  codetracer --route ./curls/create_order.sh ./app
+
   # Trace a controller action directly
   codetracer --action "OrdersController#refund" ./app
 
