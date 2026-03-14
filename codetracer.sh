@@ -594,32 +594,167 @@ find_files() {
 
 # ═══════════════════════════════════════════════════════════════
 #  FEATURE 5 — SCOPE DETECTOR
-#  For each match, show the enclosing method/function name
+#  For each match, build a breadcrumb scope chain showing all
+#  nesting levels from module/class down to the match line.
+#  Format: mod Billing:5 > cls PaymentService:6 > def batch_process:38 > blk each:39
 # ═══════════════════════════════════════════════════════════════
 show_enclosing_scope() {
   banner "ENCLOSING SCOPE for matches of: $WORD"
-  info "Scanning for '$WORD' and resolving enclosing method/function..."
+  info "Scanning for '$WORD' and resolving scope chain..."
 
-  # For each match file:line, walk back to find enclosing def/function
   local args=(--color=never --smart-case --line-number "$ROOT" -e "$WORD_REGEX")
   [[ "${#GLOBS[@]}" -gt 0 ]] && for g in "${GLOBS[@]}"; do args+=("--glob=$g"); done
 
   local scope
   rg "${args[@]}" 2>/dev/null | while IFS=: read -r file lineno rest; do
-    # walk backward through the file to find nearest def/function
     scope=$(awk -v target="$lineno" '
       NR <= target {
-        if (/^[ \t]*(def |function |const [A-Za-z_]+ = (async )?(\(|function)|async function )/) {
-          scope = $0
-          scope_line = NR
+        line = $0
+        # measure indentation (tabs -> 2 spaces)
+        gsub(/\t/, "  ", line)
+        indent = 0
+        while (substr(line, indent+1, 1) == " ") indent++
+
+        trimmed = $0
+        gsub(/^[ \t]+/, "", trimmed)
+
+        # ── Detect scope closing: end (Ruby) or } (JS) ──
+        if (trimmed ~ /^end( |$)/ || trimmed ~ /^\}/) {
+          new_n = 0
+          for (i = 1; i <= n; i++) {
+            if (scope_indent[i] < indent) {
+              new_n++
+              scope_label[new_n] = scope_label[i]
+              scope_indent[new_n] = scope_indent[i]
+              scope_line[new_n] = scope_line[i]
+            }
+          }
+          n = new_n
+        }
+
+        label = ""
+
+        # ── Ruby: module / class ──
+        if (trimmed ~ /^module /) {
+          name = trimmed; sub(/^module /, "", name); sub(/[< \t].*/, "", name)
+          label = "mod " name
+        }
+        else if (trimmed ~ /^class /) {
+          name = trimmed; sub(/^class /, "", name); sub(/[< \t{(].*/, "", name)
+          label = "cls " name
+        }
+        # ── Ruby: def self. / def ──
+        else if (trimmed ~ /^def self\./) {
+          name = trimmed; sub(/^def self\./, "", name); sub(/[( \t].*/, "", name)
+          label = "defs " name
+        }
+        else if (trimmed ~ /^def /) {
+          name = trimmed; sub(/^def /, "", name); sub(/[( \t].*/, "", name)
+          label = "def " name
+        }
+        # ── Ruby: lambda / proc ──
+        else if (trimmed ~ /= *lambda[ {(]/ || trimmed ~ /= *lambda$/) {
+          name = trimmed; sub(/ *=.*/, "", name)
+          label = "lam " name
+        }
+        else if (trimmed ~ /= *proc[ {(]/ || trimmed ~ /= *proc$/) {
+          name = trimmed; sub(/ *=.*/, "", name)
+          label = "prc " name
+        }
+        # ── JS: async function ──
+        else if (trimmed ~ /^async function /) {
+          name = trimmed; sub(/^async function /, "", name); sub(/[( \t].*/, "", name)
+          label = "async " name
+        }
+        # ── JS: export / function ──
+        else if (trimmed ~ /^(export )?(default )?function /) {
+          name = trimmed
+          sub(/^export /, "", name); sub(/^default /, "", name)
+          sub(/^function /, "", name); sub(/[( \t{].*/, "", name)
+          label = "fn " name
+        }
+        # ── JS: const arrow / const function ──
+        else if (trimmed ~ /^const [A-Za-z_$][A-Za-z0-9_$]* *= *(async *)?[\(f]/) {
+          name = trimmed; sub(/^const /, "", name); sub(/ *=.*/, "", name)
+          label = "fn " name
+        }
+        # ── JS: class method — name(args) { (exclude keywords) ──
+        else if (trimmed ~ /^[a-zA-Z_$][a-zA-Z0-9_$]*[ \t]*\(.*\).*\{[ \t]*$/ && trimmed !~ /^(if|else|for|while|switch|catch|return|throw|do|new) *\(/) {
+          name = trimmed; sub(/[ \t]*\(.*/, "", name)
+          label = "def " name
+        }
+        # ── JS: async class method — async name(args) { (not async function) ──
+        else if (trimmed ~ /^async [a-zA-Z_$][a-zA-Z0-9_$]*[ \t]*\(/ && trimmed !~ /^async function /) {
+          name = trimmed; sub(/^async /, "", name); sub(/[ \t]*\(.*/, "", name)
+          label = "async " name
+        }
+        # ── Ruby: block (do |...|) ──
+        else if (trimmed ~ / do( *\|.*\|)?[ \t]*$/) {
+          name = trimmed; sub(/ do.*/, "", name)
+          if (name ~ /\./) { sub(/.*\./, "", name) }
+          sub(/[( ].*/, "", name)
+          label = "blk " name
+        }
+        # ── JS: for / while loop ──
+        else if (trimmed ~ /^for *\(/) { label = "loop for" }
+        else if (trimmed ~ /^while *\(/) { label = "loop while" }
+        # ── Ruby: while / until ──
+        else if (trimmed ~ /^while /) { label = "loop while" }
+        else if (trimmed ~ /^until /) { label = "loop until" }
+        # ── Conditionals ──
+        else if (trimmed ~ /^if[ (]/) {
+          cond = trimmed; sub(/^if */, "", cond); sub(/[;){].*/, "", cond)
+          if (length(cond) > 30) cond = substr(cond, 1, 27) "..."
+          label = "if " cond
+        }
+        else if (trimmed ~ /^unless /) {
+          cond = trimmed; sub(/^unless /, "", cond); sub(/[;){].*/, "", cond)
+          if (length(cond) > 30) cond = substr(cond, 1, 27) "..."
+          label = "unless " cond
+        }
+        else if (trimmed ~ /^case[ \t]/) { label = "case" }
+        else if (trimmed ~ /^switch *\(/) { label = "switch" }
+        # ── Error handling ──
+        else if (trimmed ~ /^begin[ \t]*$/) { label = "begin" }
+        else if (trimmed ~ /^rescue /) {
+          name = trimmed; sub(/^rescue /, "", name); sub(/ .*/, "", name)
+          label = "rescue " name
+        }
+        else if (trimmed ~ /^try *{/) { label = "try" }
+        else if (trimmed ~ /^catch *\(/) {
+          name = trimmed; sub(/^catch *\(/, "", name); sub(/\).*/, "", name)
+          label = "catch " name
+        }
+
+        if (label != "") {
+          # Pop scopes at indent >= current (they closed before this line)
+          new_n = 0
+          for (i = 1; i <= n; i++) {
+            if (scope_indent[i] < indent) {
+              new_n++
+              scope_label[new_n] = scope_label[i]
+              scope_indent[new_n] = scope_indent[i]
+              scope_line[new_n] = scope_line[i]
+            }
+          }
+          n = new_n
+          # Push new scope
+          n++
+          scope_label[n] = label
+          scope_indent[n] = indent
+          scope_line[n] = NR
         }
       }
       END {
-        if (scope != "") {
-          gsub(/^[ \t]+/, "", scope)
-          print scope_line ": " scope
-        } else {
+        if (n == 0) {
           print "? (top-level)"
+        } else {
+          result = ""
+          for (i = 1; i <= n; i++) {
+            if (result != "") result = result " > "
+            result = result scope_label[i] ":" scope_line[i]
+          }
+          print result
         }
       }
     ' "$file" 2>/dev/null)
