@@ -8,15 +8,119 @@
 !_TAG_FIELD_DESCRIPTION	name	/tag name/
 !_TAG_FIELD_DESCRIPTION	pattern	/pattern/
 !_TAG_FIELD_DESCRIPTION	typeref	/Type and name of a variable or typedef/
+!_TAG_FIELD_DESCRIPTION!Ruby	mixin	/how the class or module is mixed in (mixin:HOW:MODULE)/
 !_TAG_FILE_FORMAT	2	/extended format; --format=1 will not append ;" to lines/
 !_TAG_FILE_SORTED	1	/0=unsorted, 1=sorted, 2=foldcase/
+!_TAG_KIND_DESCRIPTION!JavaScript	C,constant	/constants/
+!_TAG_KIND_DESCRIPTION!JavaScript	G,getter	/getters/
+!_TAG_KIND_DESCRIPTION!JavaScript	M,field	/fields/
+!_TAG_KIND_DESCRIPTION!JavaScript	S,setter	/setters/
+!_TAG_KIND_DESCRIPTION!JavaScript	c,class	/classes/
+!_TAG_KIND_DESCRIPTION!JavaScript	f,function	/functions/
+!_TAG_KIND_DESCRIPTION!JavaScript	g,generator	/generators/
+!_TAG_KIND_DESCRIPTION!JavaScript	m,method	/methods/
+!_TAG_KIND_DESCRIPTION!JavaScript	p,property	/properties/
+!_TAG_KIND_DESCRIPTION!JavaScript	v,variable	/global variables/
+!_TAG_KIND_DESCRIPTION!Ruby	A,accessor	/accessors/
+!_TAG_KIND_DESCRIPTION!Ruby	C,constant	/constants/
+!_TAG_KIND_DESCRIPTION!Ruby	L,library	/libraries/
+!_TAG_KIND_DESCRIPTION!Ruby	S,singletonMethod	/singleton methods/
+!_TAG_KIND_DESCRIPTION!Ruby	a,alias	/aliases/
+!_TAG_KIND_DESCRIPTION!Ruby	c,class	/classes/
+!_TAG_KIND_DESCRIPTION!Ruby	f,method	/methods/
+!_TAG_KIND_DESCRIPTION!Ruby	m,module	/modules/
+!_TAG_KIND_DESCRIPTION!TypeScript	C,constant	/constants/
+!_TAG_KIND_DESCRIPTION!TypeScript	G,generator	/generators/
+!_TAG_KIND_DESCRIPTION!TypeScript	a,alias	/aliases/
+!_TAG_KIND_DESCRIPTION!TypeScript	c,class	/classes/
+!_TAG_KIND_DESCRIPTION!TypeScript	e,enumerator	/enumerators (values inside an enumeration)/
+!_TAG_KIND_DESCRIPTION!TypeScript	f,function	/functions/
+!_TAG_KIND_DESCRIPTION!TypeScript	g,enum	/enums/
+!_TAG_KIND_DESCRIPTION!TypeScript	i,interface	/interfaces/
+!_TAG_KIND_DESCRIPTION!TypeScript	m,method	/methods/
+!_TAG_KIND_DESCRIPTION!TypeScript	n,namespace	/namespaces/
+!_TAG_KIND_DESCRIPTION!TypeScript	p,property	/properties/
+!_TAG_KIND_DESCRIPTION!TypeScript	v,variable	/variables/
 !_TAG_OUTPUT_EXCMD	mixed	/number, pattern, mixed, or combineV2/
 !_TAG_OUTPUT_FILESEP	slash	/slash or backslash/
 !_TAG_OUTPUT_MODE	u-ctags	/u-ctags or e-ctags/
 !_TAG_OUTPUT_VERSION	1.1	/current.age/
+!_TAG_PARSER_VERSION!JavaScript	2.2	/current.age/
+!_TAG_PARSER_VERSION!Ruby	0.0	/current.age/
+!_TAG_PARSER_VERSION!TypeScript	1.1	/current.age/
 !_TAG_PATTERN_LENGTH_LIMIT	96	/0 for no limit/
 !_TAG_PROC_CWD	/Users/hermawan/src/codetracer/	//
 !_TAG_PROGRAM_AUTHOR	Universal Ctags Team	//
 !_TAG_PROGRAM_NAME	Universal Ctags	/Derived from Exuberant Ctags/
 !_TAG_PROGRAM_URL	https://ctags.io/	/official site/
 !_TAG_PROGRAM_VERSION	6.2.0	/p6.2.20260125.0/
+!_TAG_ROLE_DESCRIPTION!JavaScript!function	foreigndecl	/declared in foreign languages/
+!_TAG_ROLE_DESCRIPTION!Ruby!library	loaded	/loaded by "load" method/
+!_TAG_ROLE_DESCRIPTION!Ruby!library	required	/loaded by "require" method/
+!_TAG_ROLE_DESCRIPTION!Ruby!library	requiredRel	/loaded by "require_relative" method/
+Billing	tests/fixtures/fixture_payment_service.rb	/^module Billing$/;"	m
+Billing	tests/fixtures/fixture_refund_service.rb	/^module Billing$/;"	m
+Order	tests/fixtures/fixture_paymentService.ts	/^interface Order {$/;"	i
+OrderController	tests/fixtures/fixture_payment_service.rb	/^  class OrderController$/;"	c	module:Billing
+PROCESS_PAYMENT_TIMEOUT	tests/fixtures/fixture_paymentService.js	/^const PROCESS_PAYMENT_TIMEOUT = 5000;$/;"	C
+PROCESS_PAYMENT_TIMEOUT	tests/fixtures/fixture_payment_service.rb	/^    PROCESS_PAYMENT_TIMEOUT = 30$/;"	C	class:Billing.PaymentService
+PaymentProcessor	tests/fixtures/fixture_paymentService.ts	/^export class PaymentProcessor {$/;"	c
+PaymentResult	tests/fixtures/fixture_paymentService.ts	/^interface PaymentResult {$/;"	i
+PaymentService	tests/fixtures/fixture_paymentService.js	/^class PaymentService {$/;"	c
+PaymentService	tests/fixtures/fixture_payment_service.rb	/^  class PaymentService$/;"	c	module:Billing
+RefundService	tests/fixtures/fixture_refund_service.rb	/^  class RefundService$/;"	c	module:Billing
+batch_process	tests/fixtures/fixture_payment_service.rb	/^    def batch_process$/;"	f	class:Billing.PaymentService
+build_context	tests/fixtures/fixture_payment_service.rb	/^    def build_context$/;"	f	class:Billing.PaymentService
+checkout	tests/fixtures/fixture_paymentService.js	/^function checkout(cart) {$/;"	f
+checkout	tests/fixtures/fixture_paymentService.ts	/^async function checkout(cart: { order: Order; total: number }) {$/;"	f
+complete_order	tests/fixtures/fixture_payment_service.rb	/^    def complete_order(order)$/;"	f	class:Billing.OrderController
+config	tests/fixtures/fixture_paymentService.js	/^const config = {$/;"	v
+config	tests/fixtures/fixture_paymentService.ts	/^const config: Record<string, unknown> = {$/;"	C
+emitPayment	tests/fixtures/fixture_paymentService.js	/^function emitPayment(emitter, order) {$/;"	f
+full_refund	tests/fixtures/fixture_refund_service.rb	/^    def self.full_refund(order)$/;"	S	class:Billing.RefundService
+getPaymentFn	tests/fixtures/fixture_paymentService.js	/^function getPaymentFn() {$/;"	f
+getProcessor	tests/fixtures/fixture_paymentService.ts	/^function getProcessor(): typeof processPayment {$/;"	f
+handleSubmit	tests/fixtures/fixture_paymentService.js	/^async function handleSubmit(event) {$/;"	f
+handle_checkout	tests/fixtures/fixture_payment_service.rb	/^    def handle_checkout(cart)$/;"	f	class:Billing.OrderController
+id	tests/fixtures/fixture_paymentService.ts	/^  id: string;$/;"	p	interface:Order
+initialize	tests/fixtures/fixture_payment_service.rb	/^    def initialize(gateway)$/;"	f	class:Billing.PaymentService
+issue_refund	tests/fixtures/fixture_refund_service.rb	/^    def issue_refund(order, amount)$/;"	f	class:Billing.RefundService
+partial_refund	tests/fixtures/fixture_refund_service.rb	/^    def partial_refund(order, pct)$/;"	f	class:Billing.RefundService
+payFn	tests/fixtures/fixture_paymentService.js	/^const { processPayment: payFn } = handlers;$/;"	C
+paymentMap	tests/fixtures/fixture_paymentService.js	/^const paymentMap = new Map();$/;"	C
+paymentQueue	tests/fixtures/fixture_paymentService.js	/^const paymentQueue = [];$/;"	v
+processPayment	tests/fixtures/fixture_paymentService.js	/^  processPayment(order, amount) {$/;"	m	class:PaymentService
+processPayment	tests/fixtures/fixture_paymentService.js	/^  processPayment: true,$/;"	p	variable:config
+processPayment	tests/fixtures/fixture_paymentService.js	/^function processPayment(order, amount) {$/;"	f
+processPayment	tests/fixtures/fixture_paymentService.ts	/^  async processPayment(order: Order): Promise<PaymentResult> {$/;"	m	class:PaymentProcessor
+processPayment	tests/fixtures/fixture_paymentService.ts	/^async function processPayment(order: Order, amount: number): Promise<PaymentResult> {$/;"	f
+processPaymentAsync	tests/fixtures/fixture_paymentService.js	/^  async processPaymentAsync(order) {$/;"	m	class:PaymentService
+processPaymentDefault	tests/fixtures/fixture_paymentService.js	/^export default function processPaymentDefault(order) {$/;"	f
+processPaymentExport	tests/fixtures/fixture_paymentService.js	/^export function processPaymentExport(order) {$/;"	f
+processPaymentFn	tests/fixtures/fixture_paymentService.js	/^let processPaymentFn = processPayment;$/;"	v
+processPaymentFn	tests/fixtures/fixture_paymentService.ts	/^const processPaymentFn: typeof processPayment = processPayment;$/;"	C
+processPaymentHandler	tests/fixtures/fixture_paymentService.js	/^const processPaymentHandler = async (req, res) => {$/;"	f
+processPaymentRef	tests/fixtures/fixture_paymentService.js	/^var processPaymentRef = processPaymentHandler;$/;"	v
+processPaymentValidator	tests/fixtures/fixture_paymentService.js	/^const processPaymentValidator = function (order) {$/;"	f
+processPaymentValidator	tests/fixtures/fixture_paymentService.ts	/^const processPaymentValidator = (order: Order): boolean => {$/;"	C
+processPaymentWithRetry	tests/fixtures/fixture_paymentService.js	/^async function processPaymentWithRetry(order, retries = 3) {$/;"	f
+process_payment	tests/fixtures/fixture_payment_service.rb	/^    def process_payment(order, amount)$/;"	f	class:Billing.PaymentService
+process_payment	tests/fixtures/fixture_payment_service.rb	/^    def self.process_payment(order)$/;"	S	class:Billing.PaymentService
+process_payment_result	tests/fixtures/fixture_payment_service.rb	/^    def process_payment_result(result)$/;"	f	class:Billing.PaymentService
+refundPayment	tests/fixtures/fixture_paymentService.js	/^function refundPayment(order) {$/;"	f
+reset_state	tests/fixtures/fixture_payment_service.rb	/^    def reset_state$/;"	f	class:Billing.PaymentService
+resolvePayment	tests/fixtures/fixture_paymentService.js	/^function resolvePayment(order) {$/;"	f
+result	tests/fixtures/fixture_paymentService.ts	/^  const result = await gateway.charge(order.id, amount);$/;"	C	function:processPayment
+result	tests/fixtures/fixture_paymentService.ts	/^  const result = await processPayment(cart.order, cart.total);$/;"	C	function:checkout
+retry_process_payment	tests/fixtures/fixture_payment_service.rb	/^    def retry_process_payment(order)$/;"	f	class:Billing.PaymentService
+runBatch	tests/fixtures/fixture_paymentService.js	/^const runBatch = (orders) => {$/;"	f
+run_payment_flow	tests/fixtures/fixture_payment_service.rb	/^    def run_payment_flow(order)$/;"	f	class:Billing.PaymentService
+schedule	tests/fixtures/fixture_payment_service.rb	/^    def schedule(callback)$/;"	f	class:Billing.PaymentService
+scheduled	tests/fixtures/fixture_paymentService.js	/^const scheduled = withRetry(processPayment, 3);$/;"	C
+success	tests/fixtures/fixture_paymentService.ts	/^  success: boolean;$/;"	p	interface:PaymentResult
+timeout	tests/fixtures/fixture_paymentService.js	/^  timeout: PROCESS_PAYMENT_TIMEOUT,$/;"	p	variable:config
+total	tests/fixtures/fixture_paymentService.ts	/^  total: number;$/;"	p	interface:Order
+transactionId	tests/fixtures/fixture_paymentService.ts	/^  transactionId: string;$/;"	p	interface:PaymentResult
+validateCard	tests/fixtures/fixture_paymentService.js	/^function validateCard(card) {$/;"	f
+validate_order	tests/fixtures/fixture_payment_service.rb	/^    def validate_order(order)$/;"	f	class:Billing.PaymentService
+withRetry	tests/fixtures/fixture_paymentService.js	/^function withRetry(fn, times) {$/;"	f
