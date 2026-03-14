@@ -57,6 +57,26 @@ class OrdersController < ApplicationController
     render json: @orders
   end
 
+  def search
+    status = params[:status]
+    page = params[:page] || 1
+    per_page = params.fetch(:per_page, 20)
+
+    @orders = current_user.orders
+    @orders = @orders.where(status: status) if status.present?
+    @orders = @orders.page(page).per(per_page)
+
+    render json: @orders
+  end
+
+  def bulk_update
+    order_params = params.require(:order).permit(:status, :notes, :priority)
+    order_ids = params[:order_ids]
+
+    Order.where(id: order_ids).update_all(order_params.to_h)
+    render json: { updated: order_ids.count }
+  end
+
   private
 
   def set_order

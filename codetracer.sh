@@ -1323,6 +1323,57 @@ parse_action_body() {
         if (length(what) > 40) what = substr(what, 1, 37) "..."
         print tree_prefix tree_branch " " dim "redirect: " what reset "  " dim ":" NR reset
       }
+      # params access: params[:key], params["key"], params.fetch(:key), params.require(:key)
+      else if (trimmed ~ /params\[:[a-z_]+\]/ || trimmed ~ /params\["[a-z_]+"\]/ || trimmed ~ /params\.fetch\(:[a-z_]+/ || trimmed ~ /params\.require\(:[a-z_]+/) {
+        # Extract all param keys from the line
+        param_line = trimmed
+        param_keys = ""
+        # Match params[:key] pattern
+        while (match(param_line, /params\[:([a-z_]+)\]/)) {
+          key = substr(param_line, RSTART + 8, RLENGTH - 9)
+          if (param_keys != "") param_keys = param_keys ", "
+          param_keys = param_keys ":" key
+          param_line = substr(param_line, RSTART + RLENGTH)
+        }
+        # Match params["key"] pattern
+        param_line = trimmed
+        while (match(param_line, /params\["([a-z_]+)"\]/)) {
+          key = substr(param_line, RSTART + 8, RLENGTH - 10)
+          if (param_keys != "") param_keys = param_keys ", "
+          param_keys = param_keys ":" key
+          param_line = substr(param_line, RSTART + RLENGTH)
+        }
+        # Match params.fetch(:key) or params.require(:key)
+        param_line = trimmed
+        while (match(param_line, /params\.(fetch|require)\(:([a-z_]+)/)) {
+          start = RSTART
+          len = RLENGTH
+          tmp = substr(param_line, start, len)
+          gsub(/params\.(fetch|require)\(:/, "", tmp)
+          if (param_keys != "") param_keys = param_keys ", "
+          param_keys = param_keys ":" tmp
+          param_line = substr(param_line, start + len)
+        }
+        if (param_keys != "") {
+          print tree_prefix tree_branch " " cyan "params: " param_keys reset "  " dim ":" NR " [query]" reset
+        }
+        # Also check for .permit on the same line
+        if (trimmed ~ /\.permit\(/) {
+          permit_str = trimmed
+          gsub(/.*\.permit\(/, "", permit_str)
+          gsub(/\).*/, "", permit_str)
+          if (length(permit_str) > 40) permit_str = substr(permit_str, 1, 37) "..."
+          print tree_prefix tree_branch " " cyan "permit: " permit_str reset "  " dim ":" NR " [query]" reset
+        }
+      }
+      # params.permit only (no require/fetch on same line)
+      else if (trimmed ~ /\.permit\(/) {
+        permit_str = trimmed
+        gsub(/.*\.permit\(/, "", permit_str)
+        gsub(/\).*/, "", permit_str)
+        if (length(permit_str) > 40) permit_str = substr(permit_str, 1, 37) "..."
+        print tree_prefix tree_branch " " cyan "permit: " permit_str reset "  " dim ":" NR " [query]" reset
+      }
     }
   ' "$file"
 }

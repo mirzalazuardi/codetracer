@@ -654,6 +654,32 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════
+#  SUITE 22 — PARAMS DETECTION
+# ══════════════════════════════════════════════════════════════
+suite "22 · Params detection"
+
+if ! $RG_AVAILABLE; then
+  skip "params detection" "rg not installed"
+elif [[ ! -d "$RAILS_FIXTURES" ]]; then
+  skip "params detection" "rails_app fixtures not found"
+else
+  # Test params[:key] detection
+  RT_SEARCH=$(run --action "OrdersController#search" "$RAILS_FIXTURES")
+
+  assert_contains "params[:status] detected"        "params:.*:status"                     "$RT_SEARCH"
+  assert_contains "params[:page] detected"          "params:.*:page"                       "$RT_SEARCH"
+  assert_contains "params.fetch detected"           "params:.*:per_page"                   "$RT_SEARCH"
+  assert_contains "query marker shown"              "\[query\]"                            "$RT_SEARCH"
+
+  # Test params.require and .permit detection
+  RT_BULK=$(run --action "OrdersController#bulk_update" "$RAILS_FIXTURES")
+
+  assert_contains "params.require detected"         "params:.*:order"                      "$RT_BULK"
+  assert_contains "permit detected"                 "permit:"                              "$RT_BULK"
+  assert_contains "order_ids param detected"        "params:.*:order_ids"                  "$RT_BULK"
+fi
+
+# ══════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════
 TOTAL=$(( PASS + FAIL + SKIP ))
