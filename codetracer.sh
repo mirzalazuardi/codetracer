@@ -141,6 +141,35 @@ ${BOLD}OPTIONS${RESET}
 
   ${GREEN}-h, --help${RESET}             Print this help and exit
 
+${BOLD}ROUTE TRACING (Rails)${RESET}
+  ${GREEN}--route  <route>${RESET}        Trace a Rails route through the request lifecycle.
+                         Format: "VERB /path" (e.g., "POST /orders/:id/refund")
+                         Parses config/routes.rb to resolve controller#action.
+
+  ${GREEN}--action <action>${RESET}       Trace a controller action directly.
+                         Format: "Controller#action" (e.g., "OrdersController#refund")
+                         Supports namespaced controllers (Admin::OrdersController#show)
+
+  ${GREEN}--depth  <n>${RESET}            Recursion depth for nested service/job traces
+                         (default: 3)
+                           0 = unlimited (use with caution)
+                           1 = callbacks + action body only
+                           3 = typical depth for most codebases
+
+  ${GREEN}--async  <mode>${RESET}         How to display async jobs (default: mark)
+                           mark   = show [async] marker
+                           inline = show job class name inline
+                           full   = expand job's perform method
+
+  Route trace output shows:
+    ├── before_action callbacks (with origins: [ApplicationController], [Concern])
+    ├── around_action callbacks
+    ├── def action_name
+    │   ├── conditionals (if/unless/case)
+    │   ├── service calls (ServiceClass.call)
+    │   └── async jobs (Job.perform_async) [async]
+    └── after_action callbacks
+
 ${BOLD}CASE-VARIANT EXPANSION${RESET}
   Every run prints the expanded variants table so you can verify
   what was actually searched. Example for input "processPayment":
@@ -255,6 +284,23 @@ ${BOLD}EXAMPLES${RESET}
   # Quick file map then open the most-hit file
   codetracer session_token . --mode file
 
+  ${DIM}── Route tracing (Rails) ──────────────────────────────────────────${RESET}
+
+  # Trace a route through the full request lifecycle
+  codetracer --route "POST /orders/:id/refund" ./app
+
+  # Trace a controller action directly
+  codetracer --action "OrdersController#refund" ./app
+
+  # Trace with deeper recursion into services
+  codetracer --action "CheckoutController#create" ./app --depth 5
+
+  # Trace a namespaced admin controller
+  codetracer --action "Admin::UsersController#destroy" ./app
+
+  # Show full async job expansion
+  codetracer --action "OrdersController#ship" ./app --async full
+
 EOF
   exit 0
 }
@@ -269,13 +315,24 @@ INTERACTIVE=false
 USE_CTAGS=false
 SHOW_SCOPE=false
 
+# Route tracing defaults
+ROUTE_INPUT=""
+ACTION_INPUT=""
+ROUTE_DEPTH=3
+ASYNC_MODE="mark"
+
 # ─── Arg Parse ────────────────────────────────────────────────
 [[ $# -eq 0 ]] && usage
 
 # Handle --help / -h before consuming the first positional arg as WORD
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
 
-WORD="$1"; shift
+# Check if first arg is --route or --action (no WORD required)
+if [[ "${1:-}" == "--route" || "${1:-}" == "--action" ]]; then
+  WORD=""  # No word for route tracing mode
+else
+  WORD="$1"; shift
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -286,6 +343,10 @@ while [[ $# -gt 0 ]]; do
     -t|--ctags)   USE_CTAGS=true;   shift ;;
     -s|--scope)   SHOW_SCOPE=true;  shift ;;
     -h|--help)    usage ;;
+    --route)      ROUTE_INPUT="$2"; MODE="route"; shift 2 ;;
+    --action)     ACTION_INPUT="$2"; MODE="route"; shift 2 ;;
+    --depth)      ROUTE_DEPTH="$2"; shift 2 ;;
+    --async)      ASYNC_MODE="$2"; shift 2 ;;
     -*)           warn "Unknown option: $1"; shift ;;
     *)            ROOT="$1";        shift ;;
   esac
@@ -446,8 +507,11 @@ build_variants() {
 }
 
 # Run it — replaces $WORD usage with $WORD_REGEX in all searches
-build_variants "$WORD"
-echo -e "  ${DIM}regex: ${RESET}${CYAN}$WORD_REGEX${RESET}"
+# Skip for route mode which doesn't use WORD
+if [[ "$MODE" != "route" ]]; then
+  build_variants "$WORD"
+  echo -e "  ${DIM}regex: ${RESET}${CYAN}$WORD_REGEX${RESET}"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 #  FEATURE 1 — DEFINITION LOCATOR
@@ -833,12 +897,615 @@ interactive_mode() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  FEATURE 8 — ROUTE TRACING
+#  Traces Rails routes through controller lifecycle
+# ═══════════════════════════════════════════════════════════════
+
+# Tree drawing characters
+TREE_VERT="│"
+TREE_BRANCH="├──"
+TREE_LAST="└──"
+TREE_SPACE="    "
+
+# Visited files tracker (prevents infinite recursion)
+VISITED_FILES=""
+
+# ─── Tree line formatter ───────────────────────────────────────
+format_tree_line() {
+  local depth="$1"
+  local is_last="$2"
+  local content="$3"
+  local line_num="$4"
+  local extra="${5:-}"
+
+  local prefix=""
+  local i
+  for ((i=0; i<depth-1; i++)); do
+    prefix+="${TREE_VERT}   "
+  done
+
+  if [[ "$is_last" == "true" ]]; then
+    prefix+="${TREE_LAST} "
+  else
+    prefix+="${TREE_BRANCH} "
+  fi
+
+  if [[ -n "$line_num" ]]; then
+    printf "%s%s${DIM}:%s${RESET}" "$prefix" "$content" "$line_num"
+  else
+    printf "%s%s" "$prefix" "$content"
+  fi
+
+  if [[ -n "$extra" ]]; then
+    printf "  ${DIM}%s${RESET}" "$extra"
+  fi
+  printf "\n"
+}
+
+# ─── Find controller file from name ────────────────────────────
+find_controller_file() {
+  local name="$1"
+  # Convert PascalCase to snake_case: OrdersController → orders_controller
+  local snake
+  snake=$(echo "$name" | sed 's/\([a-z0-9]\)\([A-Z]\)/\1_\2/g' | tr '[:upper:]' '[:lower:]')
+  # Handle namespaces (:: → /)
+  local path
+  path=$(echo "$snake" | sed 's/::/\//g')
+  # Search in app/controllers
+  local file="$ROOT/app/controllers/${path}.rb"
+  if [[ -f "$file" ]]; then
+    echo "$file"
+  else
+    # Try finding with find command
+    find "$ROOT" -path "*/controllers/*${path}.rb" -type f 2>/dev/null | head -1
+  fi
+}
+
+# ─── Parse routes.rb to find controller#action ─────────────────
+parse_routes_file() {
+  local verb="$1"
+  local path="$2"
+  local routes_file="$ROOT/config/routes.rb"
+
+  [[ ! -f "$routes_file" ]] && return 1
+
+  # Normalize path: remove leading slash, trailing slash
+  path="${path#/}"
+  path="${path%/}"
+
+  # Convert path params (:id) to regex pattern
+  local path_pattern
+  path_pattern=$(echo "$path" | sed 's/:[a-z_]*/:?[a-z_]*/g')
+
+  # Direct route: post '/path', to: 'controller#action'
+  local direct_match
+  direct_match=$(rg --no-line-number -o "(get|post|put|patch|delete)\s+['\"]/?${path_pattern}['\"].*to:\s*['\"]([a-z_]+)#([a-z_]+)['\"]" "$routes_file" 2>/dev/null | head -1)
+
+  if [[ -n "$direct_match" ]]; then
+    local ctrl action
+    ctrl=$(echo "$direct_match" | sed "s/.*to:[[:space:]]*['\"]\\([a-z_]*\\)#.*/\\1/")
+    action=$(echo "$direct_match" | sed "s/.*#\\([a-z_]*\\)['\"].*/\\1/")
+    # Convert to PascalCase controller name (portable, no \U)
+    local pascal_ctrl
+    pascal_ctrl=$(echo "${ctrl}_controller" | awk -F'_' '{
+      for (i=1; i<=NF; i++) {
+        printf "%s", toupper(substr($i,1,1)) substr($i,2)
+      }
+    }')
+    echo "${pascal_ctrl}#${action}"
+    return 0
+  fi
+
+  # Resource routes: resources :orders with member { post 'refund' }
+  # This is simplified - extract last path segment as action
+  local action_name
+  action_name=$(echo "$path" | rev | cut -d'/' -f1 | rev)
+
+  # Find resource that might contain this action
+  local resource_match
+  resource_match=$(rg --no-line-number "resources?\s+:([a-z_]+)" "$routes_file" 2>/dev/null | while read -r line; do
+    local res
+    res=$(echo "$line" | sed "s/.*resources\?[[:space:]]*:\\([a-z_]*\\).*/\\1/")
+    # Check if path contains this resource
+    if echo "$path" | grep -q "$res"; then
+      echo "$res"
+    fi
+  done | head -1)
+
+  if [[ -n "$resource_match" ]]; then
+    local pascal_ctrl
+    pascal_ctrl=$(echo "${resource_match}_controller" | awk -F'_' '{
+      for (i=1; i<=NF; i++) {
+        printf "%s", toupper(substr($i,1,1)) substr($i,2)
+      }
+    }')
+    echo "${pascal_ctrl}#${action_name}"
+    return 0
+  fi
+
+  return 1
+}
+
+# ─── Parse action input (Controller#action) ────────────────────
+parse_action_input() {
+  local input="$1"
+  if [[ "$input" =~ ^([A-Za-z:]+)#([a-z_]+)$ ]]; then
+    CONTROLLER="${BASH_REMATCH[1]}"
+    ACTION="${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
+# ─── Parse route input (VERB /path) ────────────────────────────
+parse_route_input() {
+  local input="$1"
+  local verb path
+
+  # Split on space: "POST /orders/:id/refund"
+  verb=$(echo "$input" | awk '{print toupper($1)}')
+  path=$(echo "$input" | awk '{print $2}')
+
+  local result
+  result=$(parse_routes_file "$verb" "$path")
+
+  if [[ -n "$result" ]]; then
+    CONTROLLER=$(echo "$result" | cut -d'#' -f1)
+    ACTION=$(echo "$result" | cut -d'#' -f2)
+    return 0
+  fi
+
+  warn "Could not resolve route: $input"
+  return 1
+}
+
+# ─── Parse callbacks from controller ───────────────────────────
+parse_callbacks() {
+  local file="$1"
+  local action="$2"
+
+  [[ ! -f "$file" ]] && return
+
+  # Arrays to store callbacks
+  BEFORE_CALLBACKS=()
+  AFTER_CALLBACKS=()
+  AROUND_CALLBACKS=()
+
+  local callback_type callback_name only_actions except_actions line_num
+
+  # Read file and extract callbacks
+  while IFS=: read -r lnum line; do
+    # Match: before_action :method_name, only: [...] / except: [...]
+    if echo "$line" | grep -qE '^\s*(before_action|prepend_before_action|append_before_action)\s+:'; then
+      callback_type="before"
+      # Extract callback name: first :symbol after before_action
+      callback_name=$(echo "$line" | sed 's/.*_action[[:space:]]*:\([a-z_!?]*\).*/\1/')
+
+      # Check only: constraint
+      if echo "$line" | grep -q 'only:'; then
+        only_actions=$(echo "$line" | sed 's/.*only:[[:space:]]*\[\([^]]*\)\].*/\1/' | tr -d ' :')
+        if ! echo ",$only_actions," | grep -q ",$action,"; then
+          continue  # Skip - action not in only list
+        fi
+      fi
+
+      # Check except: constraint
+      if echo "$line" | grep -q 'except:'; then
+        except_actions=$(echo "$line" | sed 's/.*except:[[:space:]]*\[\([^]]*\)\].*/\1/' | tr -d ' :')
+        if echo ",$except_actions," | grep -q ",$action,"; then
+          continue  # Skip - action in except list
+        fi
+      fi
+
+      BEFORE_CALLBACKS+=("${callback_name}:${lnum}")
+
+    elif echo "$line" | grep -qE '^\s*after_action\s+:'; then
+      callback_type="after"
+      callback_name=$(echo "$line" | sed 's/.*_action[[:space:]]*:\([a-z_!?]*\).*/\1/')
+
+      if echo "$line" | grep -q 'only:'; then
+        only_actions=$(echo "$line" | sed 's/.*only:[[:space:]]*\[\([^]]*\)\].*/\1/' | tr -d ' :')
+        if ! echo ",$only_actions," | grep -q ",$action,"; then
+          continue
+        fi
+      fi
+
+      if echo "$line" | grep -q 'except:'; then
+        except_actions=$(echo "$line" | sed 's/.*except:[[:space:]]*\[\([^]]*\)\].*/\1/' | tr -d ' :')
+        if echo ",$except_actions," | grep -q ",$action,"; then
+          continue
+        fi
+      fi
+
+      AFTER_CALLBACKS+=("${callback_name}:${lnum}")
+
+    elif echo "$line" | grep -qE '^\s*around_action\s+:'; then
+      callback_name=$(echo "$line" | sed 's/.*_action[[:space:]]*:\([a-z_!?]*\).*/\1/')
+
+      if echo "$line" | grep -q 'only:'; then
+        only_actions=$(echo "$line" | sed 's/.*only:[[:space:]]*\[\([^]]*\)\].*/\1/' | tr -d ' :')
+        if ! echo ",$only_actions," | grep -q ",$action,"; then
+          continue
+        fi
+      fi
+
+      if echo "$line" | grep -q 'except:'; then
+        except_actions=$(echo "$line" | sed 's/.*except:[[:space:]]*\[\([^]]*\)\].*/\1/' | tr -d ' :')
+        if echo ",$except_actions," | grep -q ",$action,"; then
+          continue
+        fi
+      fi
+
+      AROUND_CALLBACKS+=("${callback_name}:${lnum}")
+    fi
+  done < <(grep -n '' "$file")
+}
+
+# ─── Resolve callback origin (parent/concern) ─────────────────
+resolve_callback_origin() {
+  local callback="$1"
+  local file="$2"
+
+  # Check if callback is defined in current file
+  if rg -q "def ${callback}" "$file" 2>/dev/null; then
+    echo ""  # Defined locally
+    return
+  fi
+
+  # Check parent class
+  local parent
+  parent=$(rg -o 'class\s+\w+\s*<\s*(\w+)' "$file" 2>/dev/null | head -1 | sed 's/.*<[[:space:]]*//')
+
+  if [[ -n "$parent" ]]; then
+    local parent_file
+    parent_file=$(find_controller_file "$parent")
+    if [[ -n "$parent_file" && -f "$parent_file" ]]; then
+      if rg -q "def ${callback}" "$parent_file" 2>/dev/null; then
+        echo "[$parent]"
+        return
+      fi
+    fi
+  fi
+
+  # Check included concerns
+  local concerns
+  concerns=$(rg -o 'include\s+(\w+)' "$file" 2>/dev/null | sed 's/include[[:space:]]*//')
+
+  while read -r concern; do
+    [[ -z "$concern" ]] && continue
+    local concern_file
+    concern_file=$(find "$ROOT" -path "*/concerns/*" -name "*.rb" 2>/dev/null | while read -r cf; do
+      if rg -q "module ${concern}" "$cf" 2>/dev/null; then
+        echo "$cf"
+        break
+      fi
+    done)
+
+    if [[ -n "$concern_file" && -f "$concern_file" ]]; then
+      if rg -q "def ${callback}\|before_action :${callback}\|after_action :${callback}" "$concern_file" 2>/dev/null; then
+        echo "[${concern}]"
+        return
+      fi
+    fi
+  done <<< "$concerns"
+
+  echo ""  # Origin unknown
+}
+
+# ─── Parse action body and detect patterns ─────────────────────
+parse_action_body() {
+  local file="$1"
+  local action="$2"
+  local depth="$3"
+  local prefix="$4"
+
+  [[ ! -f "$file" ]] && return
+
+  # Find action method and extract body with awk
+  awk -v action="$action" -v depth="$depth" -v prefix="$prefix" \
+      -v green="$GREEN" -v yellow="$YELLOW" -v cyan="$CYAN" \
+      -v magenta="$MAGENTA" -v dim="$DIM" -v reset="$RESET" \
+      -v tree_vert="$TREE_VERT" -v tree_branch="$TREE_BRANCH" -v tree_last="$TREE_LAST" '
+    BEGIN { in_method = 0; method_indent = -1; line_count = 0 }
+
+    # Find method start - must match exactly "def action_name"
+    {
+      original_line = $0
+      # Measure indent before any modifications
+      match(original_line, /^[ \t]*/)
+      curr_indent = RLENGTH
+    }
+
+    /^[ \t]*def [a-z_]+/ {
+      if (in_method == 0) {
+        # Extract method name
+        method_name = original_line
+        gsub(/^[ \t]*def[ \t]+/, "", method_name)
+        gsub(/[ \t\(].*/, "", method_name)
+
+        if (method_name == action) {
+          in_method = 1
+          method_indent = curr_indent
+          print prefix tree_branch " " cyan "def " action reset "  " dim ":" NR reset
+          next
+        }
+      }
+    }
+
+    # Inside method - track and output
+    in_method == 1 {
+      # Check for method end (end at same or less indent as def)
+      if (original_line ~ /^[ \t]*end[ \t]*$/ && curr_indent <= method_indent) {
+        in_method = 0
+        next
+      }
+
+      # Check for next method start (means current method ended without explicit end)
+      if (original_line ~ /^[ \t]*def [a-z_]+/ && curr_indent <= method_indent) {
+        in_method = 0
+        next
+      }
+
+      line_count++
+      trimmed = original_line
+      gsub(/^[ \t]+/, "", trimmed)
+
+      # Skip empty lines and comments
+      if (trimmed == "" || trimmed ~ /^#/) next
+
+      # Calculate relative indent for tree drawing
+      rel_indent = int((curr_indent - method_indent - 2) / 2)
+      if (rel_indent < 0) rel_indent = 0
+      tree_prefix = prefix "    "
+      for (i = 0; i < rel_indent; i++) {
+        tree_prefix = tree_prefix tree_vert "   "
+      }
+
+      # Detect patterns
+      if (trimmed ~ /^if[ \t]/) {
+        cond = trimmed
+        gsub(/^if[ \t]+/, "", cond)
+        gsub(/[ \t]*then.*/, "", cond)
+        if (length(cond) > 35) cond = substr(cond, 1, 32) "..."
+        print tree_prefix tree_branch " " yellow "if " cond reset "  " dim ":" NR reset
+      }
+      else if (trimmed ~ /^unless[ \t]/) {
+        cond = trimmed
+        gsub(/^unless[ \t]+/, "", cond)
+        if (length(cond) > 35) cond = substr(cond, 1, 32) "..."
+        print tree_prefix tree_branch " " yellow "unless " cond reset "  " dim ":" NR reset
+      }
+      else if (trimmed ~ /^elsif[ \t]/) {
+        cond = trimmed
+        gsub(/^elsif[ \t]+/, "", cond)
+        if (length(cond) > 35) cond = substr(cond, 1, 32) "..."
+        print tree_prefix tree_branch " " yellow "elsif " cond reset "  " dim ":" NR reset
+      }
+      else if (trimmed ~ /^else[ \t]*$/) {
+        print tree_prefix tree_branch " " yellow "else" reset "  " dim ":" NR reset
+      }
+      else if (trimmed ~ /^case[ \t]/) {
+        print tree_prefix tree_branch " " yellow "case" reset "  " dim ":" NR reset
+      }
+      else if (trimmed ~ /^when[ \t]/) {
+        cond = trimmed
+        gsub(/^when[ \t]+/, "", cond)
+        print tree_prefix tree_branch " " yellow "when " cond reset "  " dim ":" NR reset
+      }
+      # Service calls: ServiceClass.call(...) or ServiceClass.new.method
+      else if (trimmed ~ /[A-Z][a-zA-Z0-9_]+(Service|Interactor|Command|Processor|Handler)\.(call|new|perform)/) {
+        match(trimmed, /[A-Z][a-zA-Z0-9_]+(Service|Interactor|Command|Processor|Handler)/)
+        svc = substr(trimmed, RSTART, RLENGTH)
+        print tree_prefix tree_branch " " green "call: " svc reset "  " dim ":" NR reset
+      }
+      # Sidekiq jobs: JobClass.perform_async/perform_in/perform_at
+      else if (trimmed ~ /[A-Z][a-zA-Z0-9_]+(Job|Worker)\.perform_(async|in|at)/) {
+        match(trimmed, /[A-Z][a-zA-Z0-9_]+(Job|Worker)/)
+        job = substr(trimmed, RSTART, RLENGTH)
+        print tree_prefix tree_branch " " magenta "enqueue: " job reset "  " dim ":" NR " [async]" reset
+      }
+      # DelayedJob: object.delay.method
+      else if (trimmed ~ /\.delay(\([^)]*\))?\./) {
+        match(trimmed, /\.delay[^.]*\.([a-z_]+)/)
+        print tree_prefix tree_branch " " magenta "delay: " trimmed reset "  " dim ":" NR " [async]" reset
+      }
+      # render calls
+      else if (trimmed ~ /^render[ \t]/) {
+        what = trimmed
+        gsub(/^render[ \t]+/, "", what)
+        if (length(what) > 40) what = substr(what, 1, 37) "..."
+        print tree_prefix tree_branch " " dim "render: " what reset "  " dim ":" NR reset
+      }
+      # redirect calls
+      else if (trimmed ~ /^redirect_to[ \t]/) {
+        what = trimmed
+        gsub(/^redirect_to[ \t]+/, "", what)
+        if (length(what) > 40) what = substr(what, 1, 37) "..."
+        print tree_prefix tree_branch " " dim "redirect: " what reset "  " dim ":" NR reset
+      }
+    }
+  ' "$file"
+}
+
+# ─── Get parent class from controller file ────────────────────
+get_parent_class() {
+  local file="$1"
+  local result
+  result=$(rg -o 'class\s+\w+\s*<\s*(\w+)' "$file" 2>/dev/null | head -1 | sed 's/.*<[[:space:]]*//' || true)
+  echo "$result"
+}
+
+# ─── Get included concerns from controller file ───────────────
+get_included_concerns() {
+  local file="$1"
+  local result
+  result=$(rg -o 'include\s+(\w+)' "$file" 2>/dev/null | sed 's/include[[:space:]]*//' || true)
+  echo "$result"
+}
+
+# ─── Main route tracing function ───────────────────────────────
+trace_route() {
+  # Parse input
+  if [[ -n "$ROUTE_INPUT" ]]; then
+    if ! parse_route_input "$ROUTE_INPUT"; then
+      warn "Failed to parse route: $ROUTE_INPUT"
+      return 1
+    fi
+    banner "ROUTE TRACE: $ROUTE_INPUT"
+
+    # Show route mapping
+    local routes_file="$ROOT/config/routes.rb"
+    if [[ -f "$routes_file" ]]; then
+      local route_line
+      route_line=$(rg -n "$ACTION" "$routes_file" 2>/dev/null | head -1 | cut -d: -f1)
+      if [[ -n "$route_line" ]]; then
+        info "routes.rb:${route_line} → ${CONTROLLER}#${ACTION}"
+      else
+        info "→ ${CONTROLLER}#${ACTION}"
+      fi
+    fi
+  elif [[ -n "$ACTION_INPUT" ]]; then
+    if ! parse_action_input "$ACTION_INPUT"; then
+      warn "Invalid action format. Use: Controller#action"
+      return 1
+    fi
+    banner "ACTION TRACE: $ACTION_INPUT"
+  else
+    warn "No --route or --action specified"
+    return 1
+  fi
+
+  # Find controller file
+  CONTROLLER_FILE=$(find_controller_file "$CONTROLLER")
+  if [[ -z "$CONTROLLER_FILE" || ! -f "$CONTROLLER_FILE" ]]; then
+    warn "Controller not found: $CONTROLLER"
+    return 1
+  fi
+
+  # Verify action exists
+  if ! rg -q "^\s*def ${ACTION}(\s|\(|$)" "$CONTROLLER_FILE" 2>/dev/null; then
+    warn "Action not found: ${ACTION} in ${CONTROLLER}"
+    return 1
+  fi
+
+  # Output controller header
+  local rel_path="${CONTROLLER_FILE#$ROOT/}"
+  section "${CONTROLLER} (${rel_path})"
+
+  # Parse callbacks from current controller
+  parse_callbacks "$CONTROLLER_FILE" "$ACTION"
+  local ctrl_before=("${BEFORE_CALLBACKS[@]}")
+  local ctrl_after=("${AFTER_CALLBACKS[@]}")
+  local ctrl_around=("${AROUND_CALLBACKS[@]}")
+
+  # Parse parent controller callbacks
+  local parent_class parent_file
+  parent_class=$(get_parent_class "$CONTROLLER_FILE")
+  local parent_before=()
+  local parent_after=()
+  if [[ -n "$parent_class" ]]; then
+    parent_file=$(find_controller_file "$parent_class")
+    if [[ -n "$parent_file" && -f "$parent_file" ]]; then
+      parse_callbacks "$parent_file" "$ACTION"
+      parent_before=("${BEFORE_CALLBACKS[@]}")
+      parent_after=("${AFTER_CALLBACKS[@]}")
+    fi
+  fi
+
+  # Parse concern callbacks
+  local concern_before=()
+  local concern_after=()
+  local concerns
+  concerns=$(get_included_concerns "$CONTROLLER_FILE")
+  while read -r concern; do
+    [[ -z "$concern" ]] && continue
+    local concern_file
+    concern_file=$(find "$ROOT" -path "*/concerns/*" -name "*.rb" 2>/dev/null | while read -r cf; do
+      if rg -q "module ${concern}" "$cf" 2>/dev/null; then
+        echo "$cf"
+        break
+      fi
+    done)
+    if [[ -n "$concern_file" && -f "$concern_file" ]]; then
+      parse_callbacks "$concern_file" "$ACTION"
+      concern_before+=("${BEFORE_CALLBACKS[@]}")
+      concern_after+=("${AFTER_CALLBACKS[@]}")
+    fi
+  done <<< "$concerns"
+
+  # Merge callbacks: parent + concern + controller (order matters for before_action)
+  BEFORE_CALLBACKS=("${parent_before[@]}" "${concern_before[@]}" "${ctrl_before[@]}")
+  AFTER_CALLBACKS=("${ctrl_after[@]}" "${concern_after[@]}" "${parent_after[@]}")
+  AROUND_CALLBACKS=("${ctrl_around[@]}")
+
+  # Count total items for is_last calculation
+  local total_items=$(( ${#BEFORE_CALLBACKS[@]} + 1 + ${#AFTER_CALLBACKS[@]} ))
+  local current_item=0
+
+  # Output before_action callbacks
+  local cb cb_name cb_line origin
+  for cb in "${BEFORE_CALLBACKS[@]}"; do
+    current_item=$((current_item + 1))
+    cb_name="${cb%%:*}"
+    cb_line="${cb##*:}"
+    origin=$(resolve_callback_origin "$cb_name" "$CONTROLLER_FILE")
+
+    local is_last="false"
+    [[ $current_item -eq $total_items ]] && is_last="true"
+
+    format_tree_line 1 "$is_last" "${YELLOW}before_action${RESET} :${cb_name}" "$cb_line" "$origin"
+  done
+
+  # Output around_action callbacks
+  for cb in "${AROUND_CALLBACKS[@]}"; do
+    current_item=$((current_item + 1))
+    cb_name="${cb%%:*}"
+    cb_line="${cb##*:}"
+    origin=$(resolve_callback_origin "$cb_name" "$CONTROLLER_FILE")
+
+    local is_last="false"
+    [[ $current_item -eq $total_items ]] && is_last="true"
+
+    format_tree_line 1 "$is_last" "${MAGENTA}around_action${RESET} :${cb_name}" "$cb_line" "$origin"
+  done
+
+  # Output action body
+  current_item=$((current_item + 1))
+  local action_is_last="false"
+  [[ ${#AFTER_CALLBACKS[@]} -eq 0 ]] && action_is_last="true"
+
+  parse_action_body "$CONTROLLER_FILE" "$ACTION" 1 ""
+
+  # Output after_action callbacks
+  local after_count=${#AFTER_CALLBACKS[@]}
+  local after_idx=0
+  for cb in "${AFTER_CALLBACKS[@]}"; do
+    after_idx=$((after_idx + 1))
+    cb_name="${cb%%:*}"
+    cb_line="${cb##*:}"
+    origin=$(resolve_callback_origin "$cb_name" "$CONTROLLER_FILE")
+
+    local is_last="false"
+    [[ $after_idx -eq $after_count ]] && is_last="true"
+
+    format_tree_line 1 "$is_last" "${CYAN}after_action${RESET} :${cb_name}" "$cb_line" "$origin"
+  done
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  HEADER
 # ═══════════════════════════════════════════════════════════════
-echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════╗${RESET}"
-echo -e "${BOLD}${CYAN}║      codetracer  ·  $WORD$(printf '%*s' $((20 - ${#WORD})) '')║${RESET}"
-echo -e "${BOLD}${CYAN}╚════════════════════════════════════╝${RESET}"
-echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}lang:${RESET} $LANG  ${DIM}mode:${RESET} $MODE  ${DIM}ctx:${RESET} ±$CTX"
+if [[ "$MODE" == "route" ]]; then
+  echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${CYAN}║      codetracer  ·  route trace                    ║${RESET}"
+  echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
+  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $ROUTE_DEPTH  ${DIM}async:${RESET} $ASYNC_MODE"
+else
+  echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${CYAN}║      codetracer  ·  $WORD$(printf '%*s' $((20 - ${#WORD})) '')║${RESET}"
+  echo -e "${BOLD}${CYAN}╚════════════════════════════════════╝${RESET}"
+  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}lang:${RESET} $LANG  ${DIM}mode:${RESET} $MODE  ${DIM}ctx:${RESET} ±$CTX"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 #  DISPATCH
@@ -872,6 +1539,9 @@ case "$MODE" in
     find_flow
     find_files
     $SHOW_SCOPE && show_enclosing_scope
+    ;;
+  route)
+    trace_route
     ;;
   *)
     warn "Unknown mode: $MODE"; usage

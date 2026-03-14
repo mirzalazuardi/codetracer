@@ -545,6 +545,115 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════
+#  SUITE 18 — MODE: ROUTE (--action)
+# ══════════════════════════════════════════════════════════════
+suite "18 · Mode: route (--action)"
+
+RAILS_FIXTURES="$SCRIPT_DIR/tests/fixtures/rails_app"
+
+if ! $RG_AVAILABLE; then
+  for t in "action parsing" "callback detection" "service detection" "async detection" "tree formatting"; do
+    skip "$t" "rg not installed"
+  done
+elif [[ ! -d "$RAILS_FIXTURES" ]]; then
+  for t in "action parsing" "callback detection" "service detection" "async detection" "tree formatting"; do
+    skip "$t" "rails_app fixtures not found"
+  done
+else
+  # Basic action trace
+  RT=$(run --action "OrdersController#refund" "$RAILS_FIXTURES")
+
+  assert_contains "controller found"                "OrdersController"                     "$RT"
+  assert_contains "action trace banner"             "ACTION TRACE"                         "$RT"
+  assert_contains "def refund shown"                "def refund"                           "$RT"
+
+  # Callback detection
+  assert_contains "before_action shown"             "before_action"                        "$RT"
+  assert_contains "callback authenticate_user"      "authenticate_user"                    "$RT"
+  assert_contains "callback set_order"              "set_order"                            "$RT"
+  assert_contains "callback origin shown"           "ApplicationController"                "$RT"
+  assert_contains "after_action shown"              "after_action"                         "$RT"
+  assert_contains "around_action shown"             "around_action"                        "$RT"
+
+  # Service call detection
+  assert_contains "service call detected"           "call:.*RefundService"                 "$RT"
+
+  # Async job detection
+  assert_contains "sidekiq job detected"            "enqueue:.*RefundNotificationJob"      "$RT"
+  assert_contains "async marker shown"              "\\[async\\]"                          "$RT"
+  assert_contains "second job detected"             "AuditLogJob"                          "$RT"
+
+  # Conditional detection
+  assert_contains "if condition shown"              "if @order.refundable"                 "$RT"
+  assert_contains "else branch shown"               "else"                                 "$RT"
+
+  # Tree formatting
+  assert_contains "tree branch char"                "├──"                                  "$RT"
+  assert_contains "tree last char"                  "└──"                                  "$RT"
+  assert_contains "line numbers shown"              ":[0-9]+"                              "$RT"
+fi
+
+# ══════════════════════════════════════════════════════════════
+#  SUITE 19 — MODE: ROUTE (--route)
+# ══════════════════════════════════════════════════════════════
+suite "19 · Mode: route (--route)"
+
+if ! $RG_AVAILABLE; then
+  skip "route parsing" "rg not installed"
+elif [[ ! -d "$RAILS_FIXTURES" ]]; then
+  skip "route parsing" "rails_app fixtures not found"
+else
+  # Test route parsing with direct route (POST /checkout → checkout#create)
+  # Note: CheckoutController doesn't exist, so we expect "Controller not found"
+  RT=$(run --route "POST /checkout" "$RAILS_FIXTURES" 2>&1 || true)
+
+  assert_contains "route trace banner"              "ROUTE TRACE"                          "$RT"
+  assert_contains "resolves to CheckoutController"  "CheckoutController"                   "$RT"
+  assert_contains "resolves to create action"       "create"                               "$RT"
+fi
+
+# ══════════════════════════════════════════════════════════════
+#  SUITE 20 — NAMESPACED CONTROLLER
+# ══════════════════════════════════════════════════════════════
+suite "20 · Namespaced controller"
+
+if ! $RG_AVAILABLE; then
+  skip "namespaced controller" "rg not installed"
+elif [[ ! -d "$RAILS_FIXTURES" ]]; then
+  skip "namespaced controller" "rails_app fixtures not found"
+else
+  RT=$(run --action "Admin::OrdersController#force_refund" "$RAILS_FIXTURES")
+
+  assert_contains "namespaced controller found"     "Admin::OrdersController"              "$RT"
+  assert_contains "force_refund action shown"       "def force_refund"                     "$RT"
+  assert_contains "admin service detected"          "AdminRefundService"                   "$RT"
+  assert_contains "admin job detected"              "AdminNotificationJob"                 "$RT"
+fi
+
+# ══════════════════════════════════════════════════════════════
+#  SUITE 21 — ERROR HANDLING
+# ══════════════════════════════════════════════════════════════
+suite "21 · Error handling"
+
+if ! $RG_AVAILABLE; then
+  skip "error handling" "rg not installed"
+elif [[ ! -d "$RAILS_FIXTURES" ]]; then
+  skip "error handling" "rails_app fixtures not found"
+else
+  # Non-existent controller
+  RT_NO_CTRL=$(run --action "NonExistentController#index" "$RAILS_FIXTURES" 2>&1 || true)
+  assert_contains "missing controller error"        "Controller not found"                 "$RT_NO_CTRL"
+
+  # Non-existent action
+  RT_NO_ACT=$(run --action "OrdersController#nonexistent" "$RAILS_FIXTURES" 2>&1 || true)
+  assert_contains "missing action error"            "Action not found"                     "$RT_NO_ACT"
+
+  # Invalid action format
+  RT_BAD_FMT=$(run --action "InvalidFormat" "$RAILS_FIXTURES" 2>&1 || true)
+  assert_contains "invalid format error"            "Invalid action format"                "$RT_BAD_FMT"
+fi
+
+# ══════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════
 TOTAL=$(( PASS + FAIL + SKIP ))
