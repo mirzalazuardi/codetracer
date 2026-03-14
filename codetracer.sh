@@ -415,16 +415,18 @@ build_variants() {
   # ── Print summary ──
   section "Case variants detected for: ${BOLD}$raw${RESET}"
   local labels=("snake_case" "SCREAMING_SNAKE" "camelCase" "PascalCase" "kebab-case" "Title Case" "space sep")
-  for i in "${!variants[@]}"; do
-    printf "  ${DIM}%-16s${RESET}  ${YELLOW}%s${RESET}\n" "${labels[$i]:-variant}" "${variants[$i]}"
+  local idx=0
+  for v in "${variants[@]}"; do
+    printf "  ${DIM}%-16s${RESET}  ${YELLOW}%s${RESET}\n" "${labels[$idx]:-variant}" "$v"
+    idx=$(( idx + 1 ))
   done
 
   # ── Return regex alternation ──
   # Escape special regex chars in each variant (spaces → \s+ for robustness)
   local regex_parts=()
+  local escaped
   for v in "${variants[@]}"; do
     # escape dots and parens, leave the rest
-    local escaped
     escaped=$(printf '%s' "$v" | sed 's/[.()[\^$*+?{}|\\]/\\&/g')
     # space-separated variant: match literal space OR underscore OR camel boundary
     regex_parts+=("$escaped")
@@ -433,6 +435,14 @@ build_variants() {
   # Join with |
   local IFS='|'
   WORD_REGEX="(${regex_parts[*]})"
+
+  # Loose regex: matches identifiers CONTAINING any variant (with optional prefix/suffix)
+  local loose_parts=()
+  for v in "${regex_parts[@]}"; do
+    loose_parts+=("\\w*${v}\\w*")
+  done
+  IFS='|'
+  WORD_REGEX_LOOSE="(${loose_parts[*]})"
 }
 
 # Run it — replaces $WORD usage with $WORD_REGEX in all searches
@@ -446,18 +456,30 @@ echo -e "  ${DIM}regex: ${RESET}${CYAN}$WORD_REGEX${RESET}"
 find_definitions() {
   banner "DEFINITIONS of: $WORD  ${DIM}→ regex: $WORD_REGEX${RESET}"
 
-  # Ruby patterns
-  RUBY_DEF="^\s*(def\s+${WORD_REGEX}|def\s+self\.${WORD_REGEX}|class\s+${WORD_REGEX}|module\s+${WORD_REGEX}|${WORD_REGEX}\s*=\s*lambda|${WORD_REGEX}\s*=\s*proc)"
-  # JS/TS patterns
-  JS_DEF="(function\s+${WORD_REGEX}[\s(]|const\s+${WORD_REGEX}\s*=\s*(async\s+)?(\(|function)|let\s+${WORD_REGEX}\s*=|var\s+${WORD_REGEX}\s*=|${WORD_REGEX}\s*:\s*(async\s+)?function|async\s+${WORD_REGEX}\s*\(|^\s*(export\s+)?(default\s+)?function\s+${WORD_REGEX}|class\s+${WORD_REGEX}[\s{])"
+  # Ruby patterns (use WORD_REGEX_LOOSE for lambda/proc to catch suffixed identifiers)
+  RUBY_DEF="^\s*(def\s+${WORD_REGEX_LOOSE}|def\s+self\.${WORD_REGEX_LOOSE}|class\s+${WORD_REGEX_LOOSE}|module\s+${WORD_REGEX_LOOSE}|${WORD_REGEX_LOOSE}\s*=\s*lambda|${WORD_REGEX_LOOSE}\s*=\s*proc)"
+  # JS/TS patterns (use WORD_REGEX_LOOSE for identifiers that may have suffixes)
+  JS_DEF="(function\s+${WORD_REGEX_LOOSE}[\s(]|const\s+${WORD_REGEX_LOOSE}\s*=\s*(async\s+)?(\(|function)|let\s+${WORD_REGEX_LOOSE}\s*=|var\s+${WORD_REGEX_LOOSE}\s*=|${WORD_REGEX_LOOSE}\s*:\s*(async\s+)?function|async\s+function\s+${WORD_REGEX_LOOSE}\s*\(|^\s*(export\s+)?(default\s+)?function\s+${WORD_REGEX_LOOSE}|class\s+${WORD_REGEX_LOOSE}[\s{])"
 
   local found=false
 
   # Ruby defs
   if [[ "$LANG" == "ruby" || "$LANG" == "all" ]]; then
     section "Ruby Definitions"
-    if rg $RG_FLAGS -e "$RUBY_DEF" "$ROOT" --glob="*.rb" --glob="*.rake" -C "$CTX" 2>/dev/null | grep -q .; then
-      rg $RG_FLAGS -e "$RUBY_DEF" "$ROOT" --glob="*.rb" --glob="*.rake" -C "$CTX" 2>/dev/null
+    local ruby_output
+    ruby_output=$(rg $RG_FLAGS -e "$RUBY_DEF" "$ROOT" --glob="*.rb" --glob="*.rake" -C "$CTX" 2>/dev/null) || true
+    if [[ -n "$ruby_output" ]]; then
+      # Show enclosing class/module from files with matching defs
+      local def_files
+      def_files=$(rg --color=never --no-line-number -l -e "$RUBY_DEF" "$ROOT" --glob="*.rb" --glob="*.rake" 2>/dev/null) || true
+      if [[ -n "$def_files" ]]; then
+        local enclosing
+        enclosing=$(echo "$def_files" | while read -r f; do
+          rg --color=always --line-number -e "^\s*(class|module)\s+\w+" "$f" 2>/dev/null
+        done) || true
+        [[ -n "$enclosing" ]] && echo "$enclosing"
+      fi
+      echo "$ruby_output"
       found=true
     else
       info "No Ruby definitions found."
@@ -467,8 +489,20 @@ find_definitions() {
   # JS/TS defs
   if [[ "$LANG" == "js" || "$LANG" == "all" ]]; then
     section "JS/TS Definitions"
-    if rg $RG_FLAGS -e "$JS_DEF" "$ROOT" --glob="*.js" --glob="*.jsx" --glob="*.ts" --glob="*.tsx" -C "$CTX" 2>/dev/null | grep -q .; then
-      rg $RG_FLAGS -e "$JS_DEF" "$ROOT" --glob="*.js" --glob="*.jsx" --glob="*.ts" --glob="*.tsx" -C "$CTX" 2>/dev/null
+    local js_output
+    js_output=$(rg $RG_FLAGS -e "$JS_DEF" "$ROOT" --glob="*.js" --glob="*.jsx" --glob="*.ts" --glob="*.tsx" -C "$CTX" 2>/dev/null) || true
+    if [[ -n "$js_output" ]]; then
+      # Show enclosing class from files with matching defs
+      local def_files
+      def_files=$(rg --color=never --no-line-number -l -e "$JS_DEF" "$ROOT" --glob="*.js" --glob="*.jsx" --glob="*.ts" --glob="*.tsx" 2>/dev/null) || true
+      if [[ -n "$def_files" ]]; then
+        local enclosing
+        enclosing=$(echo "$def_files" | while read -r f; do
+          rg --color=always --line-number -e "^\s*((export\s+)?class\s+\w+)" "$f" 2>/dev/null
+        done) || true
+        [[ -n "$enclosing" ]] && echo "$enclosing"
+      fi
+      echo "$js_output"
       found=true
     else
       info "No JS/TS definitions found."
@@ -505,7 +539,7 @@ find_flow() {
   banner "DATA FLOW for: $WORD"
 
   section "1. Assignments / bindings"
-  ASSIGN_PAT="(${WORD_REGEX}\s*=(?!=)|=>\s*${WORD_REGEX}|${WORD_REGEX}:)"
+  ASSIGN_PAT="(${WORD_REGEX_LOOSE}\s*=(?!=)|=>\s*${WORD_REGEX_LOOSE}|${WORD_REGEX_LOOSE}:)"
   local args=($RG_FLAGS -e "$ASSIGN_PAT" "$ROOT" -C 1)
   [[ "${#GLOBS[@]}" -gt 0 ]] && for g in "${GLOBS[@]}"; do args+=("--glob=$g"); done
   rg "${args[@]}" 2>/dev/null || info "No assignments found."
@@ -517,13 +551,13 @@ find_flow() {
   rg "${args2[@]}" 2>/dev/null || info "No pass-as-argument found."
 
   section "3. Returned / yielded"
-  RET_PAT="(return\s+${WORD_REGEX}|yield\s+${WORD_REGEX}|resolve\(${WORD_REGEX}|emit.*${WORD_REGEX})"
+  RET_PAT="(return\s+${WORD_REGEX_LOOSE}|yield\s+${WORD_REGEX_LOOSE}|resolve\(${WORD_REGEX}|emit.*${WORD_REGEX})"
   local args3=($RG_FLAGS -e "$RET_PAT" "$ROOT" -C 1)
   [[ "${#GLOBS[@]}" -gt 0 ]] && for g in "${GLOBS[@]}"; do args3+=("--glob=$g"); done
   rg "${args3[@]}" 2>/dev/null || info "No return/yield found."
 
   section "4. Mutations"
-  MUT_PAT="${WORD_REGEX}\.(push|pop|shift|unshift|merge!|update|delete|destroy|append|prepend|replace|set|clear)\b"
+  MUT_PAT="(${WORD_REGEX_LOOSE}\.(push|pop|shift|unshift|merge!|update|delete|destroy|append|prepend|replace|set|clear)\b|\.(push|pop|shift|unshift|merge!|update|delete|destroy|append|prepend|replace|set|clear)\(${WORD_REGEX_LOOSE})"
   local args4=($RG_FLAGS -e "$MUT_PAT" "$ROOT" -C 1)
   [[ "${#GLOBS[@]}" -gt 0 ]] && for g in "${GLOBS[@]}"; do args4+=("--glob=$g"); done
   rg "${args4[@]}" 2>/dev/null || info "No mutations found."
@@ -536,7 +570,7 @@ find_flow() {
 find_files() {
   banner "FILE MAP for: $WORD"
 
-  local args=(--color=always --smart-case -l "$ROOT" -e "$WORD_REGEX")
+  local args=(--color=never --smart-case -l "$ROOT" -e "$WORD_REGEX")
   [[ "${#GLOBS[@]}" -gt 0 ]] && for g in "${GLOBS[@]}"; do args+=("--glob=$g"); done
 
   section "Files containing '$WORD_REGEX'"
@@ -547,8 +581,8 @@ find_files() {
     info "No files found."; return
   fi
 
+  local count
   echo "$files" | while read -r f; do
-    local count
     count=$(rg --count --smart-case -e "$WORD_REGEX" "$f" 2>/dev/null || echo 0)
     printf "  ${GREEN}%4s hits${RESET}  %s\n" "$count" "$f"
   done
@@ -570,19 +604,19 @@ show_enclosing_scope() {
   local args=(--color=never --smart-case --line-number "$ROOT" -e "$WORD_REGEX")
   [[ "${#GLOBS[@]}" -gt 0 ]] && for g in "${GLOBS[@]}"; do args+=("--glob=$g"); done
 
+  local scope
   rg "${args[@]}" 2>/dev/null | while IFS=: read -r file lineno rest; do
     # walk backward through the file to find nearest def/function
-    local scope
     scope=$(awk -v target="$lineno" '
       NR <= target {
-        if (/^\s*(def |function |const [A-Za-z_]+ = (async )?(\(|function)|async function )/) {
+        if (/^[ \t]*(def |function |const [A-Za-z_]+ = (async )?(\(|function)|async function )/) {
           scope = $0
           scope_line = NR
         }
       }
       END {
         if (scope != "") {
-          gsub(/^\s+/, "", scope)
+          gsub(/^[ \t]+/, "", scope)
           print scope_line ": " scope
         } else {
           print "? (top-level)"
@@ -590,7 +624,7 @@ show_enclosing_scope() {
       }
     ' "$file" 2>/dev/null)
 
-    printf "  ${CYAN}%s${RESET}:${YELLOW}%s${RESET}\n    ${DIM}scope → %s${RESET}\n    ${DIM}match → %s${RESET}\n\n" \
+    printf "  ${CYAN}%s${RESET}:${YELLOW}%s${RESET}\n    ${DIM}scope -> %s${RESET}\n    ${DIM}match -> %s${RESET}\n\n" \
       "$file" "$lineno" "$scope" "$rest"
   done
 }
@@ -611,8 +645,8 @@ ctags_lookup() {
 
   section "Tag entries"
   if grep -E "^${WORD_REGEX}"$'\t' "$tagfile" 2>/dev/null | grep -q .; then
+    local lineno
     grep -E "^${WORD_REGEX}"$'\t' "$tagfile" | while IFS=$'\t' read -r tag file pattern rest; do
-      local lineno
       lineno=$(grep -n "${WORD_REGEX}" "$ROOT/$file" 2>/dev/null | head -1 | cut -d: -f1)
       printf "  ${BOLD}%-30s${RESET}  ${GREEN}%s${RESET}  ${DIM}line ~%s${RESET}\n" \
         "$tag" "$file" "${lineno:-?}"

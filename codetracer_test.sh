@@ -451,7 +451,7 @@ suite "16 · Optional: fzf / interactive"
 if ! $RG_AVAILABLE; then
   skip "interactive mode" "rg not installed"
 elif command -v fzf &>/dev/null; then
-  INTER=$(echo "" | bash "$CT" process_payment "$FIXTURES" --inter 2>&1 \
+  INTER=$(timeout 10 bash -c 'echo "" | bash "'"$CT"'" process_payment "'"$FIXTURES"'" --inter 2>&1' \
     | sed 's/\x1b\[[0-9;]*[mGKHF]//g' || true)
   assert_contains "Interactive mode banner shown" "INTERACTIVE MODE" "$INTER"
 else

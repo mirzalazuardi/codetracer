@@ -1,5 +1,5 @@
 # fixtures/refund_service.rb
-# Contains ZERO occurrences of process_payment.
+# Contains ZERO occurrences of the payment-processing symbol.
 # Used to assert --mode file does NOT list this file.
 
 module Billing
