@@ -123,15 +123,53 @@ OrdersController (app/controllers/orders_controller.rb)
 ├── before_action :authenticate_user!          :23  [ApplicationController]
 ├── before_action :set_order                   :8
 ├── def refund                                 :67
-│   ├── if @order.refundable?                  :68
-│   │   ├── call: RefundService.call           :69
-│   │   └── enqueue: RefundNotificationJob     :74  [async]
-│   └── else                                   :76
-│       └── render json: errors                :77
+│   ├── params: :reason                        :68  [query]
+│   ├── if @order.refundable?                  :69
+│   │   ├── call: RefundService.call           :70
+│   │   └── enqueue: RefundNotificationJob     :75  [async]
+│   └── else                                   :77
+│       └── render json: errors                :78
 └── after_action :log_refund_attempt           :10
 ```
 
-Callbacks, conditionals, service calls, Sidekiq jobs — all in one tree. Perfect for understanding unfamiliar Rails controllers or creating sequence diagrams.
+Callbacks, conditionals, params access, service calls, Sidekiq jobs — all in one tree. Perfect for understanding unfamiliar Rails controllers or creating sequence diagrams.
+
+### Trace directly from your curl files
+
+Got a directory of curl scripts for testing your API? Point codetracer at them:
+
+```bash
+# Your existing curl file
+cat api_tests/refund.sh
+```
+
+```bash
+curl -X POST "http://localhost:3000/orders/123/refund?notify=true" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "damaged", "amount": 50.00}'
+```
+
+```bash
+# Trace it
+codetracer --route api_tests/refund.sh ./app
+```
+
+codetracer automatically:
+- Extracts the HTTP verb (`POST`) and path (`/orders/:id/refund`)
+- Converts numeric IDs to `:id` (123 → :id)
+- Extracts query params (`notify`) and JSON body keys (`reason`, `amount`)
+- Shows expected params in the trace output
+
+```
+Expected params from curl:
+  query: notify
+  body: reason amount
+
+├── def refund
+    ├── params: :reason    [query]  ← matches!
+```
+
+No more wondering "does this endpoint actually use the params I'm sending?"
 
 ---
 
