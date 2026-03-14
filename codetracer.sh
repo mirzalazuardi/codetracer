@@ -144,7 +144,15 @@ ${BOLD}OPTIONS${RESET}
 ${BOLD}ROUTE TRACING (Rails)${RESET}
   ${GREEN}--route  <route>${RESET}        Trace a Rails route through the request lifecycle.
                          Format: "VERB /path" (e.g., "POST /orders/:id/refund")
+                         OR: path to a shell file containing a curl command
                          Parses config/routes.rb to resolve controller#action.
+
+                         Curl file support:
+                           - Extracts HTTP verb and path from curl URL
+                           - Converts numeric IDs to :id (e.g., /orders/123 → /orders/:id)
+                           - Extracts query params from URL (?key=value)
+                           - Extracts body params from -d '{"key": ...}'
+                           - Shows expected params in trace output
 
   ${GREEN}--action <action>${RESET}       Trace a controller action directly.
                          Format: "Controller#action" (e.g., "OrdersController#refund")
@@ -322,6 +330,12 @@ ROUTE_INPUT=""
 ACTION_INPUT=""
 ROUTE_DEPTH=3
 ASYNC_MODE="mark"
+
+# Curl parsing results (populated by parse_curl_file)
+CURL_VERB=""
+CURL_PATH=""
+CURL_QUERY_PARAMS=""
+CURL_BODY_PARAMS=""
 
 # ─── Arg Parse ────────────────────────────────────────────────
 [[ $# -eq 0 ]] && usage
@@ -999,15 +1013,36 @@ parse_routes_file() {
   fi
 
   # Resource routes: resources :orders with member { post 'refund' }
-  # This is simplified - extract last path segment as action
   local action_name
-  action_name=$(echo "$path" | rev | cut -d'/' -f1 | rev)
+  local last_segment
+  last_segment=$(echo "$path" | rev | cut -d'/' -f1 | rev)
+
+  # Determine action based on path structure and verb
+  if [[ "$last_segment" == ":id" || "$last_segment" =~ ^[0-9]+$ ]]; then
+    # Path ends with :id - standard resource actions
+    case "$verb" in
+      GET)    action_name="show" ;;
+      PATCH|PUT) action_name="update" ;;
+      DELETE) action_name="destroy" ;;
+      *)      action_name="show" ;;
+    esac
+  elif echo "$path" | grep -qE '^[a-z_]+$'; then
+    # Path is just resource name (e.g., "orders")
+    case "$verb" in
+      GET)    action_name="index" ;;
+      POST)   action_name="create" ;;
+      *)      action_name="index" ;;
+    esac
+  else
+    # Custom member/collection action (e.g., "orders/:id/refund" → "refund")
+    action_name="$last_segment"
+  fi
 
   # Find resource that might contain this action
   local resource_match
   resource_match=$(rg --no-line-number "resources?\s+:([a-z_]+)" "$routes_file" 2>/dev/null | while read -r line; do
     local res
-    res=$(echo "$line" | sed "s/.*resources\?[[:space:]]*:\\([a-z_]*\\).*/\\1/")
+    res=$(echo "$line" | sed 's/.*resources[[:space:]]*:\([a-z_]*\).*/\1/')
     # Check if path contains this resource
     if echo "$path" | grep -q "$res"; then
       echo "$res"
@@ -1040,13 +1075,90 @@ parse_action_input() {
 }
 
 # ─── Parse route input (VERB /path) ────────────────────────────
+# ─── Parse curl command from file ──────────────────────────────
+parse_curl_file() {
+  local file="$1"
+  local content verb url path query_string
+
+  # Read file content, join continuation lines (remove trailing backslash)
+  content=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%\\}"  # Remove trailing backslash
+    content="$content$line "
+  done < "$file"
+
+  # Check if it contains curl
+  if ! echo "$content" | grep -qi 'curl'; then
+    return 1
+  fi
+
+  # Extract HTTP verb from -X or --request (default: GET)
+  verb=$(echo "$content" | grep -oE '(-X|--request)[[:space:]]+[A-Z]+' | awk '{print toupper($NF)}')
+  [[ -z "$verb" ]] && verb="GET"
+
+  # Extract URL (handle both quoted and unquoted)
+  url=$(echo "$content" | grep -oE "(https?://[^[:space:]\"']+|[\"']https?://[^\"']+[\"'])" | head -1 | tr -d "\"'")
+
+  if [[ -z "$url" ]]; then
+    return 1
+  fi
+
+  # Extract path from URL (remove protocol and host)
+  path=$(echo "$url" | sed -E 's|https?://[^/]+||')
+
+  # Extract query string if present
+  if echo "$path" | grep -q '?'; then
+    query_string=$(echo "$path" | sed 's/.*?//')
+    path=$(echo "$path" | sed 's/?.*//')
+    # Parse query params and store them
+    CURL_QUERY_PARAMS=$(echo "$query_string" | tr '&' '\n' | sed 's/=.*//' | tr '\n' ' ')
+  fi
+
+  # Convert numeric path segments to :id (e.g., /orders/123/refund → /orders/:id/refund)
+  path=$(echo "$path" | sed -E 's|/[0-9]+(/\|$)|/:id\1|g')
+
+  # Extract JSON body from -d or --data (handle single or double quoted JSON)
+  local json_body
+  # Try single-quoted body first (most common for JSON)
+  json_body=$(echo "$content" | grep -oE "(-d|--data)[[:space:]]+'[^']+'" | sed "s/(-d|--data)[[:space:]]*'//;s/'$//" | head -1)
+  # If not found, try double-quoted body
+  if [[ -z "$json_body" ]]; then
+    json_body=$(echo "$content" | grep -oE '(-d|--data)[[:space:]]+"[^"]+"' | sed 's/(-d|--data)[[:space:]]*"//;s/"$//' | head -1)
+  fi
+
+  if [[ -n "$json_body" ]]; then
+    # Extract keys from JSON (simple parsing for {"key": ...} patterns)
+    CURL_BODY_PARAMS=$(echo "$json_body" | grep -oE '"[a-z_]+":' | tr -d '":' | tr '\n' ' ')
+  fi
+
+  # Set global vars for trace_route
+  CURL_VERB="$verb"
+  CURL_PATH="$path"
+
+  return 0
+}
+
 parse_route_input() {
   local input="$1"
   local verb path
 
-  # Split on space: "POST /orders/:id/refund"
-  verb=$(echo "$input" | awk '{print toupper($1)}')
-  path=$(echo "$input" | awk '{print $2}')
+  # Check if input is a file (curl file)
+  if [[ -f "$input" ]]; then
+    if parse_curl_file "$input"; then
+      verb="$CURL_VERB"
+      path="$CURL_PATH"
+      info "Parsed curl: $verb $path"
+      [[ -n "$CURL_QUERY_PARAMS" ]] && info "Query params: $CURL_QUERY_PARAMS"
+      [[ -n "$CURL_BODY_PARAMS" ]] && info "Body params: $CURL_BODY_PARAMS"
+    else
+      warn "Could not parse curl from file: $input"
+      return 1
+    fi
+  else
+    # Split on space: "POST /orders/:id/refund"
+    verb=$(echo "$input" | awk '{print toupper($1)}')
+    path=$(echo "$input" | awk '{print $2}')
+  fi
 
   local result
   result=$(parse_routes_file "$verb" "$path")
@@ -1057,7 +1169,7 @@ parse_route_input() {
     return 0
   fi
 
-  warn "Could not resolve route: $input"
+  warn "Could not resolve route: $verb $path"
   return 1
 }
 
@@ -1444,6 +1556,14 @@ trace_route() {
   # Output controller header
   local rel_path="${CONTROLLER_FILE#$ROOT/}"
   section "${CONTROLLER} (${rel_path})"
+
+  # Show curl-extracted params if present
+  if [[ -n "$CURL_QUERY_PARAMS" || -n "$CURL_BODY_PARAMS" ]]; then
+    echo -e "${DIM}Expected params from curl:${RESET}"
+    [[ -n "$CURL_QUERY_PARAMS" ]] && echo -e "  ${CYAN}query:${RESET} ${CURL_QUERY_PARAMS}"
+    [[ -n "$CURL_BODY_PARAMS" ]] && echo -e "  ${CYAN}body:${RESET} ${CURL_BODY_PARAMS}"
+    echo ""
+  fi
 
   # Parse callbacks from current controller
   parse_callbacks "$CONTROLLER_FILE" "$ACTION"

@@ -232,6 +232,7 @@ Falls back to `? (top-level)` if none found.
 
 | Function | Purpose |
 |---|---|
+| `parse_curl_file()` | Parse curl command from shell file → verb, path, query/body params |
 | `parse_routes_file()` | Parse `config/routes.rb` → controller#action mapping |
 | `find_controller_file()` | Locate controller file (handles namespaces like `Admin::`) |
 | `parse_callbacks()` | Extract before/after/around_action with only:/except: filtering |
@@ -240,6 +241,22 @@ Falls back to `? (top-level)` if none found.
 | `detect_service_calls()` | Find `ServiceClass.call(args)` patterns |
 | `detect_async_jobs()` | Find Sidekiq (`perform_async`) and DelayedJob (`.delay.`) patterns |
 | `detect_params()` | Find `params[:key]`, `params.fetch`, `params.require`, `.permit` |
+
+#### Curl file parsing
+
+When `--route` receives a file path instead of "VERB /path", it parses the curl command:
+
+```
+Input:  curl -X POST "http://localhost:3000/orders/123/refund?notify=true" -d '{"reason": "damaged"}'
+
+Output:
+  CURL_VERB = "POST"
+  CURL_PATH = "/orders/:id/refund"     ← numeric segments converted to :id
+  CURL_QUERY_PARAMS = "notify"         ← extracted from ?key=value
+  CURL_BODY_PARAMS = "reason"          ← extracted from JSON body
+```
+
+Expected params are shown in trace output before callbacks.
 
 #### Route parsing patterns
 
@@ -491,6 +508,7 @@ bash codetracer_test.sh
 20  Route: service/async detection (requires rg)
 21  Route: error handling          (requires rg)
 22  Route: params detection        (requires rg)
+23  Route: curl file parsing       (requires rg)
 ```
 
 **Test helper contract:**

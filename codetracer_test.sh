@@ -680,6 +680,36 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════
+#  SUITE 23 — CURL FILE PARSING
+# ══════════════════════════════════════════════════════════════
+suite "23 · Curl file parsing"
+
+if ! $RG_AVAILABLE; then
+  skip "curl file parsing" "rg not installed"
+elif [[ ! -d "$RAILS_FIXTURES" ]]; then
+  skip "curl file parsing" "rails_app fixtures not found"
+else
+  CURL_DIR="$RAILS_FIXTURES/curls"
+
+  # Test POST with query params and body
+  RT_POST=$(run --route "$CURL_DIR/refund_order.sh" "$RAILS_FIXTURES")
+
+  assert_contains "curl parsed correctly"           "Parsed curl: POST /orders/:id/refund" "$RT_POST"
+  assert_contains "query params extracted"          "Query params:.*notify.*priority"      "$RT_POST"
+  assert_contains "body params extracted"           "Body params:.*reason.*amount.*notes"  "$RT_POST"
+  assert_contains "resolves to refund action"       "OrdersController#refund"              "$RT_POST"
+  assert_contains "shows expected query params"     "query:.*notify.*priority"             "$RT_POST"
+  assert_contains "shows expected body params"      "body:.*reason.*amount.*notes"         "$RT_POST"
+
+  # Test GET with query params (no body)
+  RT_GET=$(run --route "$CURL_DIR/search_orders.sh" "$RAILS_FIXTURES")
+
+  assert_contains "GET curl parsed"                 "Parsed curl: GET /orders"             "$RT_GET"
+  assert_contains "GET query params extracted"      "Query params:.*status.*page"          "$RT_GET"
+  assert_contains "maps to index action"            "OrdersController#index"               "$RT_GET"
+fi
+
+# ══════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════
 TOTAL=$(( PASS + FAIL + SKIP ))

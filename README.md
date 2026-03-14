@@ -372,12 +372,32 @@ codetracer --route "POST /orders/:id/refund" ./app
 # Trace directly from controller#action
 codetracer --action "OrdersController#refund" ./app
 
+# Trace from a curl file (extracts verb, path, query params, and body params)
+codetracer --route ./curls/refund_order.sh ./app
+
 # Limit recursion depth (1 = action only, no service expansion)
 codetracer --action "OrdersController#refund" ./app --depth 1
 
 # Expand async jobs inline instead of just marking them
 codetracer --action "OrdersController#refund" ./app --async inline
 ```
+
+**Curl file support:**
+
+Pass a shell file containing a curl command to `--route`:
+
+```bash
+# curls/refund_order.sh
+curl -X POST "http://localhost:3000/orders/123/refund?notify=true" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "damaged", "amount": 50.00}'
+```
+
+codetracer will:
+- Extract HTTP verb (`POST`) and path (`/orders/:id/refund`)
+- Convert numeric IDs to `:id` automatically
+- Extract query params (`notify`) and body params (`reason`, `amount`)
+- Show expected params in trace output
 
 **Output format** — nested tree with box-drawing:
 

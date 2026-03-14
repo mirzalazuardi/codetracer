@@ -42,7 +42,9 @@
       "Bash(set +e)",
       "Bash(echo:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate documentation for Rails route tracing feature\n\n- Add Rails route tracing to Features table in README.md\n- Add --route, --action, --depth, --async options to Usage section\n- Add route tracing examples with output format sample\n- Update README_LLM.md with invocation schema, feature functions, dispatch table\n- Add route tracing test suites to test documentation\n- Add route mode global variables\n- Update changelog with +route entry\nEOF\n\\)\")",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(rg:*)",
+      "Bash(content=\"curl -d ''''{\"\"reason\"\": \"\"damaged\"\", \"\"amount\"\": 50.00, \"\"notes\"\": \"\"Customer complaint\"\"}''''\" echo \"$content\")"
     ]
   }
 }
