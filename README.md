@@ -72,7 +72,7 @@ A full `process_payment` trace across 10 files might produce ~60 lines of focuse
 | **Call site tracer** | Every place the symbol is invoked, with file + line |
 | **Data flow analysis** | Assignments → passed as argument → returned/yielded → mutations, in one pass |
 | **File map** | Which files contain the symbol + hit count per file |
-| **Enclosing scope** | For every match, walks back to the nearest `def` or `function` — "which method am I inside?" |
+| **Scope chain** | For every match, builds a full breadcrumb from module/class down through every nesting level — `mod Billing:5 > cls PaymentService:6 > def batch_process:38 > blk each:39` |
 | **ctags integration** | Precise symbol index, auto-generated if missing |
 | **Interactive fzf mode** | Fuzzy-pick any match, preview context, open in `$EDITOR` |
 | **Token-saving output** | Pipe + `head` gives minimal, exact context for AI prompts |
@@ -149,7 +149,7 @@ codetracer <word> [path] [options]
 -m, --mode  <mode>    def | call | flow | file | full  (default: full)
 -l, --lang  <lang>    ruby | js | all                  (default: all)
 -c, --ctx   <n>       Lines of context per match       (default: 3)
--s, --scope           Show enclosing method/function for every match
+-s, --scope           Show full scope chain (module > class > method > block > ...)
 -t, --ctags           Use ctags index for precise definitions
 -i, --inter           Interactive fuzzy picker (requires fzf)
 -h, --help            Full usage guide with all examples
@@ -283,12 +283,40 @@ codetracer stripe_key . --mode file
 codetracer apiClient ./frontend --lang js --mode file
 ```
 
-### `--scope` — always know where you are
+### `--scope` — full nesting breadcrumb
+
+Every match shows a scope chain from the outermost module/class down through every nesting level:
 
 ```bash
-# Every match shows its nearest enclosing def/function
-codetracer render_invoice . --mode call --scope
+codetracer process_payment . --mode call --scope
+```
 
+```
+fixture_payment_service.rb:40:        process_payment(order, order.amount)
+  scope -> mod Billing:5 > cls PaymentService:6 > def batch_process:38 > blk each:39
+
+fixture_paymentService.js:26:      return await processPayment(order, order.total);
+  scope -> async processPaymentWithRetry:23 > loop for:24 > try:25
+```
+
+**Scope labels:**
+
+| Label | Meaning | Example |
+|---|---|---|
+| `mod` | Ruby module | `mod Billing:5` |
+| `cls` | class | `cls PaymentService:6` |
+| `def` | instance method | `def batch_process:38` |
+| `defs` | class method (`def self.`) | `defs process_payment:23` |
+| `fn` | JS function / arrow | `fn checkout:53` |
+| `async` | async function | `async handleSubmit:58` |
+| `lam` | lambda | `lam process_payment_logger:9` |
+| `prc` | proc | `prc process_payment_hook:10` |
+| `blk` | block / iterator | `blk each:39` |
+| `loop` | for / while / until | `loop for:24` |
+| `if` | conditional | `if order.valid?:40` |
+| `try` | error handling | `try:25` |
+
+```bash
 # Combined with flow — full picture
 codetracer order_total . --mode flow --scope --ctx 4
 ```
