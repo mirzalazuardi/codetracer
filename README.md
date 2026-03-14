@@ -73,6 +73,7 @@ A full `process_payment` trace across 10 files might produce ~60 lines of focuse
 | **Data flow analysis** | Assignments → passed as argument → returned/yielded → mutations, in one pass |
 | **File map** | Which files contain the symbol + hit count per file |
 | **Scope chain** | For every match, builds a full breadcrumb from module/class down through every nesting level — `mod Billing:5 > cls PaymentService:6 > def batch_process:38 > blk each:39` |
+| **Rails route tracing** | Trace a route through controller lifecycle: callbacks, action body, service calls, async jobs — output as nested tree |
 | **ctags integration** | Precise symbol index, auto-generated if missing |
 | **Interactive fzf mode** | Fuzzy-pick any match, preview context, open in `$EDITOR` |
 | **Token-saving output** | Pipe + `head` gives minimal, exact context for AI prompts |
@@ -153,6 +154,12 @@ codetracer <word> [path] [options]
 -t, --ctags           Use ctags index for precise definitions
 -i, --inter           Interactive fuzzy picker (requires fzf)
 -h, --help            Full usage guide with all examples
+
+# Rails route tracing options:
+--route "VERB /path"  Trace route through controller lifecycle
+--action "Ctrl#act"   Trace controller action directly
+--depth <n>           Recursion depth for service calls (default: 3)
+--async <mode>        mark | inline | full (default: mark)
 ```
 
 ### Modes
@@ -353,6 +360,46 @@ codetracer useAuthStore ./src --lang js --mode full --scope --ctx 6
 # Everything: all modes, ctags, scope labels
 codetracer order_total . --mode full --ctags --scope
 ```
+
+### `--route` / `--action` — Rails route tracing
+
+Trace a Rails route through its full request lifecycle: controller callbacks, action body, service calls, and async jobs.
+
+```bash
+# Trace from route definition
+codetracer --route "POST /orders/:id/refund" ./app
+
+# Trace directly from controller#action
+codetracer --action "OrdersController#refund" ./app
+
+# Limit recursion depth (1 = action only, no service expansion)
+codetracer --action "OrdersController#refund" ./app --depth 1
+
+# Expand async jobs inline instead of just marking them
+codetracer --action "OrdersController#refund" ./app --async inline
+```
+
+**Output format** — nested tree with box-drawing:
+
+```
+━━━ ROUTE TRACE: OrdersController#refund ━━━
+
+OrdersController (app/controllers/orders_controller.rb)
+├── before_action :authenticate_user!          :23  [ApplicationController]
+├── before_action :set_order                   :8
+├── def refund                                 :67
+│   ├── if @order.refundable?                  :68
+│   │   ├── call: RefundService.call           :69
+│   │   └── enqueue: RefundNotificationJob     :74  [async]
+│   └── else                                   :76
+│       └── render json: errors                :77
+└── after_action :log_refund_attempt           :10
+```
+
+**Async modes:**
+- `mark` (default) — shows `[async]` marker
+- `inline` — expands job's `perform` method in tree
+- `full` — expands all nested async jobs recursively
 
 ---
 

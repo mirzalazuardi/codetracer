@@ -44,6 +44,10 @@ codetracer <WORD> [PATH] [FLAGS]
 | `--ctags` | `-t` | boolean flag | `false` |
 | `--inter` | `-i` | boolean flag | `false` — requires fzf |
 | `--help` | `-h` | boolean flag | — exits 0 after printing help |
+| `--route` | — | `"VERB /path"` | — sets MODE=route |
+| `--action` | — | `"Controller#action"` | — sets MODE=route |
+| `--depth` | — | integer | `3` (route mode only) |
+| `--async` | — | `mark` `inline` `full` | `mark` (route mode only) |
 
 ---
 
@@ -218,10 +222,70 @@ Falls back to `? (top-level)` if none found.
 
 ---
 
+### trace_route()
+
+**Triggered by**: `--route` or `--action` flag (sets MODE=route)
+**Purpose**: Trace Rails route through controller lifecycle
+**Output**: Nested tree with box-drawing characters
+
+#### Route tracing sub-functions
+
+| Function | Purpose |
+|---|---|
+| `parse_routes_file()` | Parse `config/routes.rb` → controller#action mapping |
+| `find_controller_file()` | Locate controller file (handles namespaces like `Admin::`) |
+| `parse_callbacks()` | Extract before/after/around_action with only:/except: filtering |
+| `resolve_callback_origin()` | Find where callback is defined (parent controller, concern) |
+| `parse_action_body()` | AWK-based parser for action method body |
+| `detect_service_calls()` | Find `ServiceClass.call(args)` patterns |
+| `detect_async_jobs()` | Find Sidekiq (`perform_async`) and DelayedJob (`.delay.`) patterns |
+
+#### Route parsing patterns
+
+```
+# Resources
+resources :orders              → OrdersController
+post 'refund', on: :member     → #refund action
+
+# Direct routes
+post '/path', to: 'ctrl#act'   → controller#action
+
+# Namespaces
+namespace :admin do            → Admin:: prefix
+```
+
+#### Async mode behavior
+
+| Mode | Behavior |
+|---|---|
+| `mark` | Shows `[async]` marker on job enqueue lines |
+| `inline` | Expands job's `perform` method in tree |
+| `full` | Recursively expands nested async jobs |
+
+#### Output format
+
+```
+━━━ ROUTE TRACE: Controller#action ━━━
+
+ControllerName (filepath)
+├── before_action :callback    :line  [origin]
+├── def action_name            :line
+│   ├── conditional            :line
+│   │   ├── call: Service.call :line
+│   │   └── enqueue: Job       :line  [async]
+│   └── else                   :line
+└── after_action :callback     :line
+```
+
+---
+
 ## Dispatch Table
 
 ```
 --inter=true                  → interactive_mode(); exit 0
+
+--mode=route                  → trace_route()
+                                (triggered by --route or --action)
 
 --mode=def                    → find_definitions()
                                 if --ctags: ctags_lookup()
@@ -350,6 +414,10 @@ filepath:linenum:matched_line_content
 | `RG_TYPE` | string | lang block | appended to RG_FLAGS |
 | `RG_FLAGS` | string | lang block | base rg invocation |
 | `WORD_REGEX` | string | build_variants() | all rg -e patterns |
+| `ROUTE_INPUT` | string | arg parse | route mode — "VERB /path" |
+| `ACTION_INPUT` | string | arg parse | route mode — "Controller#action" |
+| `ROUTE_DEPTH` | integer | arg parse | route mode recursion depth (default: 3) |
+| `ASYNC_MODE` | string | arg parse | route mode — mark\|inline\|full |
 
 ---
 
@@ -370,17 +438,20 @@ filepath:linenum:matched_line_content
 ## Test Suite
 
 ```
-file:     tests/codetracer_test.sh
+file:     codetracer_test.sh
 fixtures: tests/fixtures/
-          payment_service.rb     # Ruby fixture (all patterns)
-          paymentService.js      # JS fixture  (all patterns)
-          paymentService.ts      # TS fixture  (lang inclusion test)
-          refund_service.rb      # No matches  (false positive guard)
+          ruby/                    # Ruby fixtures
+          js/                      # JS/TS fixtures
+          rails_app/               # Rails app fixtures for route tracing
+            config/routes.rb
+            app/controllers/
+            app/services/
+            app/jobs/
 ```
 
 **Run:**
 ```bash
-bash tests/codetracer_test.sh
+bash codetracer_test.sh
 ```
 
 **Suites:**
@@ -401,6 +472,11 @@ bash tests/codetracer_test.sh
 14  Bug regressions                (no rg required)
 15  Optional: ctags                (skipped if ctags absent)
 16  Optional: fzf                  (skipped if fzf absent)
+17  Definition edge cases          (requires rg)
+18  Route: action parsing          (requires rg)
+19  Route: callback detection      (requires rg)
+20  Route: service/async detection (requires rg)
+21  Route: error handling          (requires rg)
 ```
 
 **Test helper contract:**
@@ -480,3 +556,4 @@ codetracer X . --mode file
 | +zsh | `setopt SH_WORD_SPLIT KSH_ARRAYS`; dual shell detection; `BASH_SOURCE[0]:-$0` in tests |
 | +zsh-array | `words=($tokens)` → `read -ra/-rA` branch; `${words[0]}` → for-loop+`_first` flag |
 | +rg-glob | `--include=` → `--glob=` throughout (rg has never had `--include`) |
+| +route | `--route` and `--action` flags; `trace_route()` + 10 sub-functions; Rails controller lifecycle tracing |
