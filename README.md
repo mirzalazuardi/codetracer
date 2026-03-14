@@ -42,6 +42,25 @@ In under a second you get: where it's defined, every call site with its enclosin
 
 **codetracer is Option C.**
 
+### Minimize dependency on AI agents
+
+AI coding agents are powerful, but every question you ask them about code structure — *"where is this method defined?"*, *"who calls this?"*, *"what files does this touch?"* — costs tokens, takes seconds to respond, and produces answers that may be wrong or stale.
+
+codetracer gives you those answers **instantly, deterministically, and for free.** No API calls, no hallucinations, no token budget. The answers come directly from your code, not from a model's interpretation of it.
+
+This doesn't mean you shouldn't use AI — it means you should **use AI for reasoning, not for searching.** Let codetracer find the relevant code first, then feed only what's needed to the AI.
+
+### Reduce token usage when you do use AI
+
+When you do need AI help, context size matters. A typical approach is to paste entire files or let an AI agent scan your codebase — both burn through tokens on irrelevant code. codetracer lets you **extract only the exact lines that matter:**
+
+```bash
+# Instead of pasting 500-line files, get the 40 lines that actually matter
+codetracer process_payment . --mode flow --scope 2>&1 | head -40
+```
+
+A full `process_payment` trace across 10 files might produce ~60 lines of focused context. Pasting the raw files would be ~2,000+ lines. That's a **30x reduction in tokens** — which means faster responses, lower cost, and less noise for the model to sift through.
+
 ---
 
 ## ✨ Features
@@ -89,6 +108,7 @@ sudo mv codetracer.sh /usr/local/bin/codetracer
 | [`universal-ctags`](https://ctags.io/) | ⬜ Optional | Precise definitions (`--ctags`) | `brew install universal-ctags` |
 
 **Linux:**
+
 ```bash
 # Ubuntu / Debian
 sudo apt install ripgrep fzf universal-ctags
@@ -98,6 +118,7 @@ sudo pacman -S ripgrep fzf ctags
 ```
 
 **Running under zsh (macOS default shell since Catalina):**
+
 ```bash
 # Works directly — no extra setup needed
 zsh codetracer.sh process_payment
@@ -415,6 +436,7 @@ Use `--lang all` (the default). codetracer searches both with language-appropria
 
 **Q: How do I keep the ctags index fresh?**  
 Add a git hook:
+
 ```bash
 echo 'ctags -R --languages=Ruby,JavaScript,TypeScript --exclude=node_modules --exclude=.git .' \
   > .git/hooks/post-checkout && chmod +x .git/hooks/post-checkout
@@ -425,6 +447,7 @@ You can use both. codetracer is for terminal-first workflows, remote servers, CI
 
 **Q: Can I pipe the output?**  
 Yes, all output goes to stdout. Use `2>&1` to also capture warnings:
+
 ```bash
 codetracer process_payment . --mode flow 2>&1 | grep "def\|call" | head -30
 codetracer invoice_total . --mode file 2>&1 > /tmp/results.txt
