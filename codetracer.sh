@@ -165,6 +165,8 @@ ${BOLD}ROUTE TRACING (Rails)${RESET}
     ├── before_action callbacks (with origins: [ApplicationController], [Concern])
     ├── around_action callbacks
     ├── def action_name
+    │   ├── params: :key              [query]  ← params[:key], params.fetch, params.require
+    │   ├── permit: :a, :b, :c        [query]  ← .permit() allowed attributes
     │   ├── conditionals (if/unless/case)
     │   ├── service calls (ServiceClass.call)
     │   └── async jobs (Job.perform_async) [async]

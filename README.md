@@ -388,13 +388,20 @@ OrdersController (app/controllers/orders_controller.rb)
 ├── before_action :authenticate_user!          :23  [ApplicationController]
 ├── before_action :set_order                   :8
 ├── def refund                                 :67
-│   ├── if @order.refundable?                  :68
-│   │   ├── call: RefundService.call           :69
-│   │   └── enqueue: RefundNotificationJob     :74  [async]
-│   └── else                                   :76
-│       └── render json: errors                :77
+│   ├── params: :reason                        :68  [query]
+│   ├── if @order.refundable?                  :69
+│   │   ├── call: RefundService.call           :70
+│   │   └── enqueue: RefundNotificationJob     :75  [async]
+│   └── else                                   :77
+│       └── render json: errors                :78
 └── after_action :log_refund_attempt           :10
 ```
+
+**Detected patterns:**
+- `params[:key]`, `params.fetch(:key)`, `params.require(:key)` → shown with `[query]` marker
+- `.permit(:a, :b)` → shows allowed attributes with `[query]` marker
+- Service calls (`ServiceClass.call`) → shown with `call:` prefix
+- Async jobs (`Job.perform_async`) → shown with `[async]` marker
 
 **Async modes:**
 - `mark` (default) — shows `[async]` marker

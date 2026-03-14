@@ -239,6 +239,7 @@ Falls back to `? (top-level)` if none found.
 | `parse_action_body()` | AWK-based parser for action method body |
 | `detect_service_calls()` | Find `ServiceClass.call(args)` patterns |
 | `detect_async_jobs()` | Find Sidekiq (`perform_async`) and DelayedJob (`.delay.`) patterns |
+| `detect_params()` | Find `params[:key]`, `params.fetch`, `params.require`, `.permit` |
 
 #### Route parsing patterns
 
@@ -262,6 +263,16 @@ namespace :admin do            → Admin:: prefix
 | `inline` | Expands job's `perform` method in tree |
 | `full` | Recursively expands nested async jobs |
 
+#### Params detection patterns
+
+| Pattern | Output |
+|---|---|
+| `params[:key]` | `params: :key  [query]` |
+| `params["key"]` | `params: :key  [query]` |
+| `params.fetch(:key)` | `params: :key  [query]` |
+| `params.require(:key)` | `params: :key  [query]` |
+| `.permit(:a, :b, :c)` | `permit: :a, :b, :c  [query]` |
+
 #### Output format
 
 ```
@@ -270,6 +281,8 @@ namespace :admin do            → Admin:: prefix
 ControllerName (filepath)
 ├── before_action :callback    :line  [origin]
 ├── def action_name            :line
+│   ├── params: :key           :line  [query]
+│   ├── permit: :a, :b         :line  [query]
 │   ├── conditional            :line
 │   │   ├── call: Service.call :line
 │   │   └── enqueue: Job       :line  [async]
@@ -477,6 +490,7 @@ bash codetracer_test.sh
 19  Route: callback detection      (requires rg)
 20  Route: service/async detection (requires rg)
 21  Route: error handling          (requires rg)
+22  Route: params detection        (requires rg)
 ```
 
 **Test helper contract:**
