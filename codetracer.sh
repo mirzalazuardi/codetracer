@@ -169,6 +169,10 @@ ${BOLD}ROUTE TRACING (Rails)${RESET}
                            inline = show job class name inline
                            full   = expand job's perform method
 
+  ${GREEN}--highlight${RESET}              Enable syntax highlighting via pygmentize
+                           Uses gruvbox-dark theme with 16-color terminal
+                           Requires: pygmentize (pip install Pygments)
+
   Route trace output shows:
     ├── before_action callbacks (with origins: [ApplicationController], [Concern])
     ├── around_action callbacks
@@ -339,6 +343,7 @@ MODEL_INPUT=""
 MODEL_CLASS=""
 MODEL_METHOD=""
 MODEL_DEPTH=3
+HIGHLIGHT=false
 
 # Curl parsing results (populated by parse_curl_file)
 CURL_VERB=""
@@ -373,6 +378,7 @@ while [[ $# -gt 0 ]]; do
     --model)      MODEL_INPUT="$2"; MODE="model"; shift 2 ;;
     --depth)      ROUTE_DEPTH="$2"; MODEL_DEPTH="$2"; shift 2 ;;
     --async)      ASYNC_MODE="$2"; shift 2 ;;
+    --highlight)  HIGHLIGHT=true; shift ;;
     -*)           warn "Unknown option: $1"; shift ;;
     *)            ROOT="$1";        shift ;;
   esac
@@ -951,6 +957,65 @@ TREE_SPACE="    "
 # Visited files tracker (prevents infinite recursion)
 VISITED_FILES=""
 
+# ─── Pygmentize highlight helpers ─────────────────────────────
+# Highlights a block of Ruby code via pygmentize (16-color, gruvbox-dark)
+highlight_ruby() {
+  if [[ "$HIGHLIGHT" == "true" ]] && command -v pygmentize &>/dev/null; then
+    pygmentize -l ruby -f terminal -O style=gruvbox-dark 2>/dev/null || cat
+  else
+    cat
+  fi
+}
+
+# Highlight a single line of Ruby code (strips trailing newline)
+highlight_ruby_line() {
+  local line="$1"
+  if [[ "$HIGHLIGHT" == "true" ]] && command -v pygmentize &>/dev/null; then
+    echo "$line" | pygmentize -l ruby -f terminal -O style=gruvbox-dark 2>/dev/null | tr -d '\n'
+  else
+    printf "%s" "$line"
+  fi
+}
+
+# Extract raw method body (no formatting, just the Ruby lines)
+extract_method_body() {
+  local file="$1"
+  local action="$2"
+  awk -v action="$action" '
+    BEGIN { in_method = 0; method_indent = -1 }
+    {
+      original = $0
+      match(original, /^[ \t]*/)
+      curr = RLENGTH
+    }
+    /^[ \t]*def (self\.)?[a-z_]+/ {
+      if (in_method == 0) {
+        name = original
+        gsub(/^[ \t]*def[ \t]+/, "", name)
+        gsub(/[ \t\(].*/, "", name)
+        match_name = name
+        gsub(/^self\./, "", match_name)
+        if (match_name == action) {
+          in_method = 1
+          method_indent = curr
+          print original
+          next
+        }
+      }
+    }
+    in_method == 1 {
+      if (original ~ /^[ \t]*end[ \t]*$/ && curr <= method_indent) {
+        print original
+        exit
+      }
+      if (original ~ /^[ \t]*def (self\.)?[a-z_]+/ && curr <= method_indent) {
+        exit
+      }
+      print original
+    }
+  ' "$file"
+}
+
 # ─── Tree line formatter ───────────────────────────────────────
 format_tree_line() {
   local depth="$1"
@@ -969,6 +1034,14 @@ format_tree_line() {
     prefix+="${TREE_LAST} "
   else
     prefix+="${TREE_BRANCH} "
+  fi
+
+  # When highlight mode is on, re-highlight content as Ruby
+  if [[ "$HIGHLIGHT" == "true" ]] && command -v pygmentize &>/dev/null; then
+    # Strip existing ANSI from content, highlight as Ruby
+    local raw_content
+    raw_content=$(printf "%s" "$content" | sed $'s/\033\\[[0-9;]*m//g')
+    content=$(printf "%s" "$raw_content" | pygmentize -l ruby -f terminal -O style=gruvbox-dark 2>/dev/null | tr -d '\n') || content="$raw_content"
   fi
 
   if [[ -n "$line_num" ]]; then
@@ -1842,6 +1915,105 @@ resolve_callback_origin() {
   echo ""  # Origin unknown
 }
 
+# ─── Parse action body with pygmentize highlighting ────────────
+parse_action_body_highlighted() {
+  local file="$1"
+  local action="$2"
+  local depth="$3"
+  local prefix="$4"
+
+  [[ ! -f "$file" ]] && return
+
+  local raw_body
+  raw_body=$(extract_method_body "$file" "$action")
+  [[ -z "$raw_body" ]] && return
+
+  # Get the starting line number of the method
+  local start_line
+  start_line=$(rg -n "^\s*def\s+(self\.)?${action}[\s(]?" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+  [[ -z "$start_line" ]] && start_line=0
+
+  # Get method indent from first line (raw, before any processing)
+  local method_indent
+  method_indent=$(echo "$raw_body" | head -1 | sed 's/[^ \t].*//' | wc -c)
+  method_indent=$((method_indent - 1))
+
+  # Pre-process: for each line, compute indent metadata and strip to content.
+  # Store: raw_indent|trimmed_line (one per line)
+  # Then highlight all trimmed lines at once, and re-attach tree prefixes.
+  local -a raw_indents=()
+  local -a raw_trimmed=()
+  local -a raw_linenrs=()
+  local line_nr=$((start_line))
+
+  while IFS= read -r raw_line; do
+    local stripped
+    stripped=$(echo "$raw_line" | sed 's/^[[:space:]]*//')
+
+    # Measure raw indent
+    local rindent
+    rindent=$(echo "$raw_line" | sed 's/[^ \t].*//' | wc -c)
+    rindent=$((rindent - 1))
+
+    raw_indents+=("$rindent")
+    raw_trimmed+=("$stripped")
+    raw_linenrs+=("$line_nr")
+    line_nr=$((line_nr + 1))
+  done <<< "$raw_body"
+
+  # Build a block of trimmed lines for batch highlighting
+  local trimmed_block=""
+  local idx
+  for ((idx=0; idx<${#raw_trimmed[@]}; idx++)); do
+    trimmed_block+="${raw_trimmed[$idx]}"$'\n'
+  done
+
+  # Highlight the entire trimmed block at once
+  local highlighted
+  highlighted=$(printf "%s" "$trimmed_block" | pygmentize -l ruby -f terminal -O style=gruvbox-dark 2>/dev/null) || highlighted="$trimmed_block"
+
+  # Read highlighted lines back and pair with metadata
+  local -a hl_lines=()
+  while IFS= read -r hl_line; do
+    hl_lines+=("$hl_line")
+  done <<< "$highlighted"
+
+  local is_first=true
+  for ((idx=0; idx<${#hl_lines[@]}; idx++)); do
+    local hl_line="${hl_lines[$idx]}"
+    local raw_content="${raw_trimmed[$idx]}"
+    local rindent="${raw_indents[$idx]}"
+    local lnr="${raw_linenrs[$idx]}"
+
+    # Skip empty lines, comments, and 'end' keywords
+    [[ -z "$raw_content" ]] && continue
+    [[ "$raw_content" == \#* ]] && continue
+    [[ "$raw_content" == "end" ]] && continue
+
+    # Calculate relative indent
+    local rel_indent=$(( (rindent - method_indent - 2) / 2 ))
+    [[ $rel_indent -lt 0 ]] && rel_indent=0
+
+    # Strip trailing ANSI codes and whitespace that pygmentize adds
+    hl_line=$(printf "%s" "$hl_line" | sed $'s/\033\\[[0-9;]*m[[:space:]]*$//; s/[[:space:]]*$//')
+
+    if [[ "$is_first" == "true" ]]; then
+      # First line is the def line
+      printf "%s%s  ${DIM}:%s${RESET}\n" "${prefix}${TREE_BRANCH} " "$hl_line" "$lnr"
+      is_first=false
+    else
+      # Body lines with tree indentation
+      local tree_pfx="${prefix}    "
+      local i
+      for ((i=0; i<rel_indent; i++)); do
+        tree_pfx+="${TREE_VERT}   "
+      done
+      tree_pfx+="${TREE_BRANCH} "
+      printf "%s%s  ${DIM}:%s${RESET}\n" "$tree_pfx" "$hl_line" "$lnr"
+    fi
+  done
+}
+
 # ─── Parse action body and detect patterns ─────────────────────
 parse_action_body() {
   local file="$1"
@@ -1851,6 +2023,12 @@ parse_action_body() {
   local show_all="${5:-false}"
 
   [[ ! -f "$file" ]] && return
+
+  # Dispatch to highlighted version when --highlight is active
+  if [[ "$HIGHLIGHT" == "true" ]] && command -v pygmentize &>/dev/null; then
+    parse_action_body_highlighted "$file" "$action" "$depth" "$prefix"
+    return
+  fi
 
   # Find action method and extract body with awk
   awk -v action="$action" -v depth="$depth" -v prefix="$prefix" \
@@ -2224,12 +2402,16 @@ if [[ "$MODE" == "route" ]]; then
   echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}${CYAN}║      codetracer  ·  route trace                    ║${RESET}"
   echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
-  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $ROUTE_DEPTH  ${DIM}async:${RESET} $ASYNC_MODE"
+  _hl_label=""
+  [[ "$HIGHLIGHT" == "true" ]] && _hl_label="  ${DIM}highlight:${RESET} on"
+  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $ROUTE_DEPTH  ${DIM}async:${RESET} $ASYNC_MODE${_hl_label}"
 elif [[ "$MODE" == "model" ]]; then
   echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}${CYAN}║      codetracer  ·  model trace                    ║${RESET}"
   echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
-  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $MODEL_DEPTH"
+  _hl_label=""
+  [[ "$HIGHLIGHT" == "true" ]] && _hl_label="  ${DIM}highlight:${RESET} on"
+  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $MODEL_DEPTH${_hl_label}"
 else
   echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}${CYAN}║      codetracer  ·  $WORD$(printf '%*s' $((20 - ${#WORD})) '')║${RESET}"
