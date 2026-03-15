@@ -198,6 +198,43 @@ ${BOLD}ROUTE TRACING (Rails)${RESET}
     │   └── async jobs (Job.perform_async) [async]
     └── after_action callbacks
 
+${BOLD}MODEL TRACING (Rails)${RESET}
+  ${GREEN}--model  <model>${RESET}        Trace a Rails model's structure and behavior.
+                         Format: "ModelName" or "ModelName#method"
+                         Examples:
+                           --model "Order"              (full model overview)
+                           --model "User#authenticate"  (trace specific method)
+                           --model "Admin::Report"      (namespaced model)
+
+  ${GREEN}--depth  <n>${RESET}            Recursion depth for method call traces
+                         (default: 3)
+                           1 = model structure only (no method bodies)
+                           2 = include method bodies
+                           3+ = follow cross-class calls from methods
+
+  ${GREEN}--highlight${RESET}              Enable syntax highlighting via pygmentize
+
+  ${GREEN}--trace  <level>${RESET}        Call chain tracing for methods (see ROUTE TRACING)
+
+  Model trace output shows:
+    ├── include/extend/prepend (concerns, modules)
+    ├── Associations
+    │   ├── has_many :items, dependent: :destroy
+    │   ├── belongs_to :user
+    │   └── has_one :receipt
+    ├── Validations
+    │   ├── validates :email, presence: true
+    │   └── validates :status, inclusion: {in: [...]}
+    ├── Callbacks
+    │   ├── before_save :normalize_email
+    │   └── after_create :send_welcome_email
+    ├── Scopes
+    │   ├── scope :active
+    │   └── scope :recent
+    └── Methods
+        ├── def calculate_total
+        └── def self.find_by_token
+
 ${BOLD}CASE-VARIANT EXPANSION${RESET}
   Every run prints the expanded variants table so you can verify
   what was actually searched. Example for input "processPayment":
@@ -331,6 +368,26 @@ ${BOLD}EXAMPLES${RESET}
 
   # Show full async job expansion
   codetracer --action "OrdersController#ship" ./app --async full
+
+  # Trace with call chain tracing enabled
+  codetracer --route "POST /checkout" ./app --trace all
+
+  ${DIM}── Model tracing (Rails) ──────────────────────────────────────────${RESET}
+
+  # Trace a model's full structure (associations, validations, etc.)
+  codetracer --model "Order" ./app
+
+  # Trace a specific method in a model
+  codetracer --model "User#authenticate" ./app
+
+  # Trace a namespaced model
+  codetracer --model "Admin::AuditLog" ./app
+
+  # Shallow trace (structure only, no method bodies)
+  codetracer --model "Payment" ./app --depth 1
+
+  # Deep trace with cross-class call chains
+  codetracer --model "Order#calculate_total" ./app --depth 5 --trace cross
 
 EOF
   exit 0
