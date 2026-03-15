@@ -334,6 +334,12 @@ ACTION_INPUT=""
 ROUTE_DEPTH=3
 ASYNC_MODE="mark"
 
+# Model tracing defaults
+MODEL_INPUT=""
+MODEL_CLASS=""
+MODEL_METHOD=""
+MODEL_DEPTH=3
+
 # Curl parsing results (populated by parse_curl_file)
 CURL_VERB=""
 CURL_PATH=""
@@ -346,9 +352,9 @@ CURL_BODY_PARAMS=""
 # Handle --help / -h before consuming the first positional arg as WORD
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
 
-# Check if first arg is --route or --action (no WORD required)
-if [[ "${1:-}" == "--route" || "${1:-}" == "--action" ]]; then
-  WORD=""  # No word for route tracing mode
+# Check if first arg is --route, --action, or --model (no WORD required)
+if [[ "${1:-}" == "--route" || "${1:-}" == "--action" || "${1:-}" == "--model" ]]; then
+  WORD=""  # No word for route/model tracing mode
 else
   WORD="$1"; shift
 fi
@@ -364,12 +370,28 @@ while [[ $# -gt 0 ]]; do
     -h|--help)    usage ;;
     --route)      ROUTE_INPUT="$2"; MODE="route"; shift 2 ;;
     --action)     ACTION_INPUT="$2"; MODE="route"; shift 2 ;;
-    --depth)      ROUTE_DEPTH="$2"; shift 2 ;;
+    --model)      MODEL_INPUT="$2"; MODE="model"; shift 2 ;;
+    --depth)      ROUTE_DEPTH="$2"; MODEL_DEPTH="$2"; shift 2 ;;
     --async)      ASYNC_MODE="$2"; shift 2 ;;
     -*)           warn "Unknown option: $1"; shift ;;
     *)            ROOT="$1";        shift ;;
   esac
 done
+
+# ─── Auto-detect Rails root ────────────────────────────────────
+# If ROOT doesn't contain config/routes.rb, walk up to find the Rails root.
+# This allows passing ./app or any subdirectory as ROOT.
+if [[ ("$MODE" == "route" || "$MODE" == "model") && ! -f "$ROOT/config/routes.rb" ]]; then
+  _check_dir="$(cd "$ROOT" 2>/dev/null && pwd)"
+  while [[ -n "$_check_dir" && "$_check_dir" != "/" ]]; do
+    if [[ -f "$_check_dir/config/routes.rb" ]]; then
+      ROOT="$_check_dir"
+      break
+    fi
+    _check_dir="${_check_dir%/*}"
+  done
+  unset _check_dir
+fi
 
 # ─── Tool check ───────────────────────────────────────────────
 require rg grep awk find
@@ -526,8 +548,8 @@ build_variants() {
 }
 
 # Run it — replaces $WORD usage with $WORD_REGEX in all searches
-# Skip for route mode which doesn't use WORD
-if [[ "$MODE" != "route" ]]; then
+# Skip for route/model mode which doesn't use WORD
+if [[ "$MODE" != "route" && "$MODE" != "model" ]]; then
   build_variants "$WORD"
   echo -e "  ${DIM}regex: ${RESET}${CYAN}$WORD_REGEX${RESET}"
 fi
@@ -980,6 +1002,254 @@ find_controller_file() {
   fi
 }
 
+# ─── Find model file from name ──────────────────────────────────
+find_model_file() {
+  local name="$1"
+  local snake
+  snake=$(echo "$name" | sed 's/\([a-z0-9]\)\([A-Z]\)/\1_\2/g' | tr '[:upper:]' '[:lower:]')
+  local path
+  path=$(echo "$snake" | sed 's/::/\//g')
+  local file="$ROOT/app/models/${path}.rb"
+  if [[ -f "$file" ]]; then
+    echo "$file"
+  else
+    find "$ROOT" -path "*/models/*${path}.rb" -type f 2>/dev/null | head -1
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  FEATURE — MODEL TRACING
+#  Traces Rails models: associations, validations, callbacks,
+#  scopes, concerns, and methods with call chains
+# ═══════════════════════════════════════════════════════════════
+
+parse_model_input() {
+  local input="$1"
+  if [[ "$input" =~ ^([A-Za-z:]+)#([a-z_]+[!?]?)$ ]]; then
+    MODEL_CLASS="${BASH_REMATCH[1]}"
+    MODEL_METHOD="${BASH_REMATCH[2]}"
+  else
+    MODEL_CLASS="$input"
+    MODEL_METHOD=""
+  fi
+}
+
+# ─── Extract included modules/concerns ─────────────────────────
+extract_model_includes() {
+  local file="$1"
+  local depth="$2"
+  local matches
+  matches=$(rg -n "^\s*(include|extend|prepend)\s+" "$file" 2>/dev/null | grep -v "^#" || true)
+
+  [[ -z "$matches" ]] && return
+
+  section "Includes"
+  local count total
+  total=$(echo "$matches" | wc -l | tr -d ' ')
+  count=0
+
+  while IFS= read -r line; do
+    count=$((count + 1))
+    local lineno content kind module_name is_last
+    lineno=$(echo "$line" | cut -d: -f1)
+    content=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    kind=$(echo "$content" | awk '{print $1}')
+    module_name=$(echo "$content" | awk '{print $2}' | tr -d ',')
+    is_last="false"
+    [[ $count -eq $total ]] && is_last="true"
+    format_tree_line "$depth" "$is_last" "${YELLOW}${kind}${RESET} ${module_name}" "$lineno"
+  done <<< "$matches"
+}
+
+# ─── Extract associations ──────────────────────────────────────
+extract_model_associations() {
+  local file="$1"
+  local depth="$2"
+  local matches
+  matches=$(rg -n "^\s*(has_many|has_one|belongs_to|has_and_belongs_to_many)\s+" "$file" 2>/dev/null | grep -v "^\s*#" || true)
+
+  [[ -z "$matches" ]] && return
+
+  section "Associations"
+  local count total
+  total=$(echo "$matches" | wc -l | tr -d ' ')
+  count=0
+
+  while IFS= read -r line; do
+    count=$((count + 1))
+    local lineno content assoc_type assoc_rest is_last
+    lineno=$(echo "$line" | cut -d: -f1)
+    content=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    assoc_type=$(echo "$content" | awk '{print $1}')
+    assoc_rest=$(echo "$content" | sed "s/^${assoc_type}[[:space:]]*//")
+    # Truncate long lines
+    [[ ${#assoc_rest} -gt 60 ]] && assoc_rest="${assoc_rest:0:57}..."
+    is_last="false"
+    [[ $count -eq $total ]] && is_last="true"
+    format_tree_line "$depth" "$is_last" "${GREEN}${assoc_type}${RESET} ${assoc_rest}" "$lineno"
+  done <<< "$matches"
+}
+
+# ─── Extract validations ──────────────────────────────────────
+extract_model_validations() {
+  local file="$1"
+  local depth="$2"
+  local matches
+  matches=$(rg -n "^\s*(validates?|validates_presence_of|validates_uniqueness_of|validates_numericality_of|validates_format_of|validates_inclusion_of|validates_exclusion_of|validates_length_of|validates_acceptance_of|validates_confirmation_of|validates_associated|validate)\s+" "$file" 2>/dev/null | grep -v "^\s*#" || true)
+
+  [[ -z "$matches" ]] && return
+
+  section "Validations"
+  local count total
+  total=$(echo "$matches" | wc -l | tr -d ' ')
+  count=0
+
+  while IFS= read -r line; do
+    count=$((count + 1))
+    local lineno content val_type val_rest is_last
+    lineno=$(echo "$line" | cut -d: -f1)
+    content=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    val_type=$(echo "$content" | awk '{print $1}')
+    val_rest=$(echo "$content" | sed "s/^${val_type}[[:space:]]*//")
+    [[ ${#val_rest} -gt 60 ]] && val_rest="${val_rest:0:57}..."
+    is_last="false"
+    [[ $count -eq $total ]] && is_last="true"
+    format_tree_line "$depth" "$is_last" "${CYAN}${val_type}${RESET} ${val_rest}" "$lineno"
+  done <<< "$matches"
+}
+
+# ─── Extract callbacks ────────────────────────────────────────
+extract_model_callbacks() {
+  local file="$1"
+  local depth="$2"
+  local matches
+  matches=$(rg -n "^\s*(before_validation|after_validation|before_save|after_save|around_save|before_create|after_create|around_create|before_update|after_update|around_update|before_destroy|after_destroy|around_destroy|after_commit|after_create_commit|after_update_commit|after_destroy_commit|after_rollback|after_initialize|after_find|after_touch)\s+" "$file" 2>/dev/null | grep -v "^\s*#" || true)
+
+  [[ -z "$matches" ]] && return
+
+  section "Callbacks"
+  local count total
+  total=$(echo "$matches" | wc -l | tr -d ' ')
+  count=0
+
+  while IFS= read -r line; do
+    count=$((count + 1))
+    local lineno content cb_type cb_rest is_last
+    lineno=$(echo "$line" | cut -d: -f1)
+    content=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    cb_type=$(echo "$content" | awk '{print $1}')
+    cb_rest=$(echo "$content" | sed "s/^${cb_type}[[:space:]]*//")
+    [[ ${#cb_rest} -gt 60 ]] && cb_rest="${cb_rest:0:57}..."
+    is_last="false"
+    [[ $count -eq $total ]] && is_last="true"
+    format_tree_line "$depth" "$is_last" "${YELLOW}${cb_type}${RESET} ${cb_rest}" "$lineno"
+  done <<< "$matches"
+}
+
+# ─── Extract scopes ───────────────────────────────────────────
+extract_model_scopes() {
+  local file="$1"
+  local depth="$2"
+  local matches
+  matches=$(rg -n "^\s*scope\s+:" "$file" 2>/dev/null | grep -v "^\s*#" || true)
+
+  [[ -z "$matches" ]] && return
+
+  section "Scopes"
+  local count total
+  total=$(echo "$matches" | wc -l | tr -d ' ')
+  count=0
+
+  while IFS= read -r line; do
+    count=$((count + 1))
+    local lineno content scope_name is_last
+    lineno=$(echo "$line" | cut -d: -f1)
+    content=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    # Extract scope name
+    scope_name=$(echo "$content" | sed 's/scope[[:space:]]*\(:[a-z_]*\).*/\1/')
+    is_last="false"
+    [[ $count -eq $total ]] && is_last="true"
+    format_tree_line "$depth" "$is_last" "${MAGENTA}scope${RESET} ${scope_name}" "$lineno"
+  done <<< "$matches"
+}
+
+# ─── Extract and trace methods ─────────────────────────────────
+extract_model_methods() {
+  local file="$1"
+  local depth="$2"
+  local target_method="${3:-}"
+  local matches
+
+  if [[ -n "$target_method" ]]; then
+    matches=$(rg -n "^\s*def\s+(self\.)?${target_method}[\s(]?" "$file" 2>/dev/null || true)
+  else
+    matches=$(rg -n "^\s*def\s+" "$file" 2>/dev/null || true)
+  fi
+
+  [[ -z "$matches" ]] && return
+
+  section "Methods"
+  local count total
+  total=$(echo "$matches" | wc -l | tr -d ' ')
+  count=0
+
+  while IFS= read -r line; do
+    count=$((count + 1))
+    local lineno content method_sig is_last
+    lineno=$(echo "$line" | cut -d: -f1)
+    content=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    method_sig=$(echo "$content" | sed 's/^\(def[[:space:]]*[a-zA-Z_.:!?]*\).*/\1/')
+    is_last="false"
+    [[ $count -eq $total ]] && is_last="true"
+
+    # Extract method name for body parsing
+    local method_name
+    method_name=$(echo "$content" | sed 's/def[[:space:]]*\(self\.\)\{0,1\}\([a-z_!?]*\).*/\2/')
+
+    # If depth allows, trace method body (parse_action_body prints its own def header)
+    if [[ $MODEL_DEPTH -gt 1 ]]; then
+      parse_action_body "$file" "$method_name" "$depth" "" "true"
+    else
+      format_tree_line "$depth" "$is_last" "${CYAN}${method_sig}${RESET}" "$lineno"
+    fi
+  done <<< "$matches"
+}
+
+# ─── Main model tracing function ──────────────────────────────
+trace_model() {
+  parse_model_input "$MODEL_INPUT"
+
+  local model_file
+  model_file=$(find_model_file "$MODEL_CLASS")
+  if [[ -z "$model_file" || ! -f "$model_file" ]]; then
+    warn "Model not found: $MODEL_CLASS"
+    return 1
+  fi
+
+  banner "MODEL TRACE: $MODEL_INPUT"
+  local rel_path="${model_file#$ROOT/}"
+  section "${MODEL_CLASS} (${rel_path})"
+
+  # Show parent class
+  local parent_class
+  parent_class=$(rg -o "class\s+${MODEL_CLASS}\s*<\s*(\S+)" "$model_file" 2>/dev/null | sed 's/class.*<[[:space:]]*//')
+  [[ -n "$parent_class" ]] && info "inherits from ${parent_class}"
+
+  if [[ -n "$MODEL_METHOD" ]]; then
+    # Trace a specific method — show relevant callbacks too
+    extract_model_callbacks "$model_file" 1
+    extract_model_methods "$model_file" 1 "$MODEL_METHOD"
+  else
+    # Full model trace
+    extract_model_includes "$model_file" 1
+    extract_model_associations "$model_file" 1
+    extract_model_validations "$model_file" 1
+    extract_model_callbacks "$model_file" 1
+    extract_model_scopes "$model_file" 1
+    extract_model_methods "$model_file" 1
+  fi
+}
+
 # ─── Parse routes.rb to find controller#action ─────────────────
 parse_routes_file() {
   local verb="$1"
@@ -992,17 +1262,47 @@ parse_routes_file() {
   path="${path#/}"
   path="${path%/}"
 
+  # ── Detect namespace prefix ──────────────────────────────────
+  # Check if the first path segment matches a namespace in routes.rb
+  # e.g., "v2/order_items/oc_items" → namespace_prefix="v2", path="order_items/oc_items"
+  local namespace_prefix=""
+  local first_segment="${path%%/*}"
+  if [[ "$first_segment" != "$path" ]]; then
+    # Check if this segment is declared as a namespace in routes.rb
+    if rg -q "namespace\s+:${first_segment}" "$routes_file" 2>/dev/null; then
+      namespace_prefix="$first_segment"
+      path="${path#${first_segment}/}"
+    fi
+  fi
+
   # Convert path params (:id) to regex pattern
   local path_pattern
   path_pattern=$(echo "$path" | sed 's/:[a-z_]*/:?[a-z_]*/g')
 
+  # Build namespace controller prefix (e.g., "v2" → "V2::")
+  local ns_ctrl_prefix=""
+  if [[ -n "$namespace_prefix" ]]; then
+    ns_ctrl_prefix=$(echo "$namespace_prefix" | awk '{print toupper($0)}')"::"
+  fi
+
   # Direct route: post '/path', to: 'controller#action'
   local direct_match
-  direct_match=$(rg --no-line-number -o "(get|post|put|patch|delete)\s+['\"]/?${path_pattern}['\"].*to:\s*['\"]([a-z_]+)#([a-z_]+)['\"]" "$routes_file" 2>/dev/null | head -1)
+  # Try with full path (including namespace prefix) first
+  local full_path_pattern
+  if [[ -n "$namespace_prefix" ]]; then
+    full_path_pattern=$(echo "${namespace_prefix}/${path}" | sed 's/:[a-z_]*/:?[a-z_]*/g')
+  else
+    full_path_pattern="$path_pattern"
+  fi
+  direct_match=$(rg --no-line-number -o "(get|post|put|patch|delete)\s+['\"]/?${full_path_pattern}['\"].*to:\s*['\"]([a-z_/]+)#([a-z_]+)['\"]" "$routes_file" 2>/dev/null | head -1)
+  # Also try without namespace prefix (routes inside namespace block use relative paths)
+  if [[ -z "$direct_match" && -n "$namespace_prefix" ]]; then
+    direct_match=$(rg --no-line-number -o "(get|post|put|patch|delete)\s+['\"]/?${path_pattern}['\"].*to:\s*['\"]([a-z_/]+)#([a-z_]+)['\"]" "$routes_file" 2>/dev/null | head -1)
+  fi
 
   if [[ -n "$direct_match" ]]; then
     local ctrl action
-    ctrl=$(echo "$direct_match" | sed "s/.*to:[[:space:]]*['\"]\\([a-z_]*\\)#.*/\\1/")
+    ctrl=$(echo "$direct_match" | sed "s/.*to:[[:space:]]*['\"]\\([a-z_/]*\\)#.*/\\1/")
     action=$(echo "$direct_match" | sed "s/.*#\\([a-z_]*\\)['\"].*/\\1/")
     # Convert to PascalCase controller name (portable, no \U)
     local pascal_ctrl
@@ -1011,7 +1311,12 @@ parse_routes_file() {
         printf "%s", toupper(substr($i,1,1)) substr($i,2)
       }
     }')
-    echo "${pascal_ctrl}#${action}"
+    # Prepend namespace if not already in the controller path
+    if [[ -n "$ns_ctrl_prefix" && "$ctrl" != *"/"* ]]; then
+      echo "${ns_ctrl_prefix}${pascal_ctrl}#${action}"
+    else
+      echo "${pascal_ctrl}#${action}"
+    fi
     return 0
   fi
 
@@ -1042,15 +1347,35 @@ parse_routes_file() {
   fi
 
   # Find resource that might contain this action
+  # When namespace is present, find the resource within the namespace block
   local resource_match
-  resource_match=$(rg --no-line-number "resources?\s+:([a-z_]+)" "$routes_file" 2>/dev/null | while read -r line; do
-    local res
-    res=$(echo "$line" | sed 's/.*resources[[:space:]]*:\([a-z_]*\).*/\1/')
-    # Check if path contains this resource
-    if echo "$path" | grep -q "$res"; then
-      echo "$res"
+  if [[ -n "$namespace_prefix" ]]; then
+    # Find namespace line number, then search for resources within that block
+    local ns_line
+    ns_line=$(rg -n "namespace\s+:${namespace_prefix}" "$routes_file" 2>/dev/null | head -1 | cut -d: -f1)
+    if [[ -n "$ns_line" ]]; then
+      # Search from the namespace line onwards for the resource
+      resource_match=$(tail -n +"$ns_line" "$routes_file" | rg --no-line-number "resources?\s+:([a-z_]+)" 2>/dev/null | while read -r line; do
+        local res
+        res=$(echo "$line" | sed 's/.*resources[[:space:]]*:\([a-z_]*\).*/\1/')
+        if echo "$path" | grep -q "$res"; then
+          echo "$res"
+          break
+        fi
+      done | head -1)
     fi
-  done | head -1)
+  fi
+  # Fallback: search all resources globally
+  if [[ -z "$resource_match" ]]; then
+    resource_match=$(rg --no-line-number "resources?\s+:([a-z_]+)" "$routes_file" 2>/dev/null | while read -r line; do
+      local res
+      res=$(echo "$line" | sed 's/.*resources[[:space:]]*:\([a-z_]*\).*/\1/')
+      # Check if path contains this resource
+      if echo "$path" | grep -q "$res"; then
+        echo "$res"
+      fi
+    done | head -1)
+  fi
 
   if [[ -n "$resource_match" ]]; then
     local pascal_ctrl
@@ -1059,7 +1384,7 @@ parse_routes_file() {
         printf "%s", toupper(substr($i,1,1)) substr($i,2)
       }
     }')
-    echo "${pascal_ctrl}#${action_name}"
+    echo "${ns_ctrl_prefix}${pascal_ctrl}#${action_name}"
     return 0
   fi
 
@@ -1315,11 +1640,13 @@ parse_action_body() {
   local action="$2"
   local depth="$3"
   local prefix="$4"
+  local show_all="${5:-false}"
 
   [[ ! -f "$file" ]] && return
 
   # Find action method and extract body with awk
   awk -v action="$action" -v depth="$depth" -v prefix="$prefix" \
+      -v show_all="$show_all" \
       -v green="$GREEN" -v yellow="$YELLOW" -v cyan="$CYAN" \
       -v magenta="$MAGENTA" -v dim="$DIM" -v reset="$RESET" \
       -v tree_vert="$TREE_VERT" -v tree_branch="$TREE_BRANCH" -v tree_last="$TREE_LAST" '
@@ -1490,6 +1817,12 @@ parse_action_body() {
         gsub(/\).*/, "", permit_str)
         if (length(permit_str) > 40) permit_str = substr(permit_str, 1, 37) "..."
         print tree_prefix tree_branch " " cyan "permit: " permit_str reset "  " dim ":" NR " [query]" reset
+      }
+      # Fallback: show unrecognized lines in dim (useful for model methods)
+      else if (show_all == "true") {
+        line_text = trimmed
+        if (length(line_text) > 60) line_text = substr(line_text, 1, 57) "..."
+        print tree_prefix tree_branch " " dim line_text reset "  " dim ":" NR reset
       }
     }
   ' "$file"
@@ -1676,6 +2009,11 @@ if [[ "$MODE" == "route" ]]; then
   echo -e "${BOLD}${CYAN}║      codetracer  ·  route trace                    ║${RESET}"
   echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
   echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $ROUTE_DEPTH  ${DIM}async:${RESET} $ASYNC_MODE"
+elif [[ "$MODE" == "model" ]]; then
+  echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${CYAN}║      codetracer  ·  model trace                    ║${RESET}"
+  echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
+  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $MODEL_DEPTH"
 else
   echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}${CYAN}║      codetracer  ·  $WORD$(printf '%*s' $((20 - ${#WORD})) '')║${RESET}"
@@ -1718,6 +2056,9 @@ case "$MODE" in
     ;;
   route)
     trace_route
+    ;;
+  model)
+    trace_model
     ;;
   *)
     warn "Unknown mode: $MODE"; usage
