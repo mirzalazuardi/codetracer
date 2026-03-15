@@ -17,7 +17,7 @@
 [![Shell](https://img.shields.io/badge/shell-bash-4EAA25?style=flat-square&logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/mirzalazuardi/codetracer/blob/main/LICENSE)
 [![Requires](https://img.shields.io/badge/requires-ripgrep-red?style=flat-square)](https://github.com/BurntSushi/ripgrep)
-[![Optional](https://img.shields.io/badge/optional-fzf%20%7C%20ctags-orange?style=flat-square)](https://github.com/junegunn/fzf)
+[![Optional](https://img.shields.io/badge/optional-fzf%20%7C%20ctags%20%7C%20pygmentize-orange?style=flat-square)](https://github.com/junegunn/fzf)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/mirzalazuardi/codetracer/blob/main/CONTRIBUTING.md)
 
 [Features](#-features) · [Install](#-install) · [Usage](#-usage) · [Examples](#-examples) · [Workflows](#-workflows) · [FAQ](#-faq)
@@ -74,6 +74,9 @@ A full `process_payment` trace across 10 files might produce ~60 lines of focuse
 | **File map** | Which files contain the symbol + hit count per file |
 | **Scope chain** | For every match, builds a full breadcrumb from module/class down through every nesting level — `mod Billing:5 > cls PaymentService:6 > def batch_process:38 > blk each:39` |
 | **Rails route tracing** | Trace a route through controller lifecycle: callbacks, action body, service calls, async jobs — output as nested tree |
+| **Rails model tracing** | Trace model structure: associations, validations, callbacks, scopes, methods, and cross-class call chains |
+| **Cross-class call chain** | Automatically follows method calls into other classes, interactor organizers, and service objects — across all trace modes |
+| **Syntax highlighting** | Optional pygmentize integration (`--highlight`) for Ruby syntax highlighting with gruvbox-dark theme |
 | **ctags integration** | Precise symbol index, auto-generated if missing |
 | **Interactive fzf mode** | Fuzzy-pick any match, preview context, open in `$EDITOR` |
 | **Token-saving output** | Pipe + `head` gives minimal, exact context for AI prompts |
@@ -107,6 +110,7 @@ sudo mv codetracer.sh /usr/local/bin/codetracer
 | `awk`, `grep`, `find` | ✅ Required | Scope walking, tag lookup | Built-in on macOS/Linux |
 | [`fzf`](https://github.com/junegunn/fzf) | ⬜ Optional | Interactive mode (`--inter`) | `brew install fzf` |
 | [`universal-ctags`](https://ctags.io/) | ⬜ Optional | Precise definitions (`--ctags`) | `brew install universal-ctags` |
+| [`pygmentize`](https://pygments.org/) | ⬜ Optional | Syntax highlighting (`--highlight`) | `pip install Pygments` |
 
 **Linux:**
 
@@ -155,11 +159,13 @@ codetracer <word> [path] [options]
 -i, --inter           Interactive fuzzy picker (requires fzf)
 -h, --help            Full usage guide with all examples
 
-# Rails route tracing options:
+# Rails route/model tracing options:
 --route "VERB /path"  Trace route through controller lifecycle
 --action "Ctrl#act"   Trace controller action directly
---depth <n>           Recursion depth for service calls (default: 3)
+--model "Model#meth"  Trace model structure and method call chains
+--depth <n>           Recursion depth for cross-class calls (default: 3)
 --async <mode>        mark | inline | full (default: mark)
+--highlight           Syntax highlighting via pygmentize (gruvbox-dark)
 ```
 
 ### Modes
@@ -423,10 +429,110 @@ OrdersController (app/controllers/orders_controller.rb)
 - Service calls (`ServiceClass.call`) → shown with `call:` prefix
 - Async jobs (`Job.perform_async`) → shown with `[async]` marker
 
+**Cross-class call chain tracing:**
+
+All trace modes (`--route`, `--action`, `--model`) automatically follow method calls into other classes:
+
+- **Service calls** (`RefundService.call(...)`) — traces into the service's `call` method
+- **Constructor calls** (`CachingService.new(...)`) — traces into `initialize`
+- **Interactor organizers** (`organize ClassA, ClassB`) — expands each organized interactor
+- **DSL-only classes** (serializers, etc.) — shows class summary when no matching method is found
+
+Depth is controlled by `--depth` (default: 3). Visited methods are tracked to prevent infinite loops.
+
 **Async modes:**
 - `mark` (default) — shows `[async]` marker
 - `inline` — expands job's `perform` method in tree
 - `full` — expands all nested async jobs recursively
+
+### `--model` — Rails model tracing
+
+Trace model structure: associations, validations, callbacks, scopes, concerns, and method bodies with cross-class call chains.
+
+```bash
+# Trace full model structure
+codetracer --model "Order" ./app
+
+# Trace a specific method and follow calls into other classes
+codetracer --model "Order#oc_order" ./app
+
+# With syntax highlighting
+codetracer --model "Order#oc_order" ./app --highlight
+
+# Deeper call chain (default: 3)
+codetracer --model "OrderItem#update_discount_order" ./app --depth 5
+```
+
+Supports both instance methods and class methods (`def self.method_name`).
+Method arguments in input are accepted and stripped: `"OrderItem#update_discount(order, params)"`.
+
+**Output format:**
+
+```
+━━━ MODEL TRACE: Order#oc_order ━━━
+
+[Order (app/models/order.rb)]
+
+[Includes]
+├── include Archivable
+├── include Discountable
+└── include Payable
+
+[Associations]
+├── has_many :order_items
+├── belongs_to :outlet
+└── has_one :payment
+
+[Validations]
+├── validates :order_no, presence: true
+└── validates :status, inclusion: { in: %w[...] }
+
+[Callbacks]
+├── before_save :calculate_totals
+└── after_create :generate_order_number
+
+[Scopes]
+├── scope :active
+└── scope :by_date
+
+[Methods]
+├── def oc_order
+│   ├── if order_items.any?
+│   │   ├── call: OrderCompliment
+│   ...
+```
+
+### `--highlight` — syntax highlighting
+
+Enable Ruby syntax highlighting via [pygmentize](https://pygments.org/) with gruvbox-dark theme (16-color terminal).
+
+```bash
+# Route trace with highlighting
+codetracer --route "POST /orders/:id/refund" ./app --highlight
+
+# Model trace with highlighting
+codetracer --model "Order#oc_order" ./app --highlight
+
+# Also works with curl files
+codetracer --route ./curls/refund.sh ./app --highlight
+```
+
+Highlights both method bodies and tree structure items (callbacks, associations, etc.).
+Falls back to default coloring if pygmentize is not installed.
+
+**Curl file value display:**
+
+When tracing from a curl file, query params show decoded keys with their original values as dim comments:
+
+```
+Expected params from curl:
+  query: current_user_id # 10604ca2-... is_paid # true
+         order[date][geq] # Sun, 15 Mar 2026 00:00:00.000
+         payment_methods[] # cash_amount, credit_amount, debit_amount, ...
+         sort[order] # desc  per_page # 20
+```
+
+Array params (e.g., `payment_methods[]`) are deduplicated with values merged.
 
 ---
 

@@ -14,7 +14,7 @@ type:       bash script (single file, also runs under zsh)
 file:       codetracer.sh
 shebang:    #!/usr/bin/env bash
 requires:   bash >= 4.0  OR  zsh >= 5.0,  ripgrep (rg)
-optional:   fzf, universal-ctags
+optional:   fzf, universal-ctags, pygmentize (Pygments)
 purpose:    trace symbols across Ruby/JS/TS codebases without an IDE or LLM
 repo:       https://github.com/mirzalazuardi/codetracer
 invoke:     bash codetracer.sh <word>   # explicit bash
@@ -44,10 +44,12 @@ codetracer <WORD> [PATH] [FLAGS]
 | `--ctags` | `-t` | boolean flag | `false` |
 | `--inter` | `-i` | boolean flag | `false` — requires fzf |
 | `--help` | `-h` | boolean flag | — exits 0 after printing help |
-| `--route` | — | `"VERB /path"` | — sets MODE=route |
+| `--route` | — | `"VERB /path"` or curl file path | — sets MODE=route |
 | `--action` | — | `"Controller#action"` | — sets MODE=route |
-| `--depth` | — | integer | `3` (route mode only) |
+| `--model` | — | `"Model#method"` or `"Model"` | — sets MODE=model |
+| `--depth` | — | integer | `3` (route/model mode) |
 | `--async` | — | `mark` `inline` `full` | `mark` (route mode only) |
+| `--highlight` | — | boolean flag | `false` — requires pygmentize |
 
 ---
 
@@ -290,6 +292,34 @@ namespace :admin do            → Admin:: prefix
 | `params.require(:key)` | `params: :key  [query]` |
 | `.permit(:a, :b, :c)` | `permit: :a, :b, :c  [query]` |
 
+#### Cross-class call chain tracing
+
+All trace modes (`--route`, `--action`, `--model`) follow calls into other classes:
+
+| Pattern | Traced as |
+|---|---|
+| `ServiceClass.call(...)` | `ServiceClass#call` |
+| `ClassName.new(...)` | `ClassName#initialize` |
+| `ClassName.new(...).method(...)` | `ClassName#method` |
+| `Interactor::Organizer` with `organize` | Expands each organized class |
+| Method not in file (gem method) | Shows class summary (methods, attributes, DSL) |
+
+Depth controlled by `--depth` (default: 3). Visited `class#method` pairs tracked to prevent infinite loops.
+
+#### Curl param value display
+
+When `--route` receives a curl file, query params are URL-decoded with original values shown:
+
+```
+Input:  ?order%5Bdate%5D%5Bgeq%5D=Sun,+15+Mar+2026&payment_methods%5B%5D=cash&payment_methods%5B%5D=credit
+
+Output:
+  order[date][geq] # Sun, 15 Mar 2026
+  payment_methods[] # cash, credit
+```
+
+Array params deduplicated, values merged with commas.
+
 #### Output format
 
 ```
@@ -305,6 +335,89 @@ ControllerName (filepath)
 │   │   └── enqueue: Job       :line  [async]
 │   └── else                   :line
 └── after_action :callback     :line
+
+[ServiceClass#call (filepath)]
+├── def call                   :line
+│   ├── ...body...
+```
+
+---
+
+### trace_model()
+
+**Triggered by**: `--model` flag (sets MODE=model)
+**Purpose**: Trace Rails model structure and method call chains
+**Input**: `"Model#method"` or `"Model"` (full structure)
+
+#### Model tracing sub-functions
+
+| Function | Purpose |
+|---|---|
+| `parse_model_input()` | Parse `"Order#method"` → MODEL_CLASS + MODEL_METHOD. Strips args `(...)` |
+| `find_model_file()` | Convert PascalCase → snake_case, search `app/models/` |
+| `extract_model_includes()` | Find `include`, `extend`, `prepend` statements |
+| `extract_model_associations()` | Find `has_many`, `has_one`, `belongs_to`, `has_and_belongs_to_many` |
+| `extract_model_validations()` | Find `validates`, `validate`, `validates_*_of` |
+| `extract_model_callbacks()` | Find `before_save`, `after_create`, `around_update`, etc. |
+| `extract_model_scopes()` | Find `scope :name` |
+| `extract_model_methods()` | List or trace methods; follows cross-class calls for target method |
+| `extract_cross_class_calls()` | AWK parser: extracts `ClassName.method()` patterns from method body |
+| `trace_call_chain()` | Recursive tracer: follows calls across files with visited tracking |
+
+#### Output format
+
+```
+━━━ MODEL TRACE: Order#oc_order ━━━
+
+[Order (app/models/order.rb)]
+
+[Includes]
+├── include Archivable
+└── include Payable
+
+[Associations]
+├── has_many :order_items
+└── belongs_to :outlet
+
+[Validations]
+├── validates :order_no, presence: true
+
+[Callbacks]
+├── before_save :calculate_totals
+
+[Scopes]
+├── scope :active
+
+[Methods]
+├── def oc_order
+│   ├── if condition
+│   │   ├── call: OrderCompliment
+│   ...
+
+[OrderCompliment [organizer] (filepath)]
+└── organize ClassA, ClassB
+
+[ClassA#call (filepath)]
+├── def call
+│   ├── ...body...
+```
+
+---
+
+### highlight mode
+
+**Triggered by**: `--highlight` flag
+**Requires**: `pygmentize` binary (from Pygments)
+**Config**: 16-color terminal, gruvbox-dark theme
+
+| Component | Behavior |
+|---|---|
+| Method bodies | Full body extracted → batch pygmentize → tree prefixes added |
+| Tree items (callbacks, etc.) | ANSI stripped → re-highlighted as Ruby via pygmentize |
+| Fallback | If pygmentize unavailable, uses default ANSI coloring |
+
+```bash
+pygmentize -l ruby -f terminal -O style=gruvbox-dark
 ```
 
 ---
@@ -316,6 +429,9 @@ ControllerName (filepath)
 
 --mode=route                  → trace_route()
                                 (triggered by --route or --action)
+
+--mode=model                  → trace_model()
+                                (triggered by --model)
 
 --mode=def                    → find_definitions()
                                 if --ctags: ctags_lookup()
@@ -444,10 +560,14 @@ filepath:linenum:matched_line_content
 | `RG_TYPE` | string | lang block | appended to RG_FLAGS |
 | `RG_FLAGS` | string | lang block | base rg invocation |
 | `WORD_REGEX` | string | build_variants() | all rg -e patterns |
-| `ROUTE_INPUT` | string | arg parse | route mode — "VERB /path" |
+| `ROUTE_INPUT` | string | arg parse | route mode — "VERB /path" or file path |
 | `ACTION_INPUT` | string | arg parse | route mode — "Controller#action" |
-| `ROUTE_DEPTH` | integer | arg parse | route mode recursion depth (default: 3) |
+| `MODEL_INPUT` | string | arg parse | model mode — "Model#method" or "Model" |
+| `ROUTE_DEPTH` | integer | arg parse | route/model recursion depth (default: 3) |
+| `MODEL_DEPTH` | integer | arg parse | model recursion depth (default: 3) |
 | `ASYNC_MODE` | string | arg parse | route mode — mark\|inline\|full |
+| `HIGHLIGHT` | bool | arg parse | enable pygmentize highlighting (default: false) |
+| `TRACE_VISITED` | string | trace_call_chain() | space-separated "Class#method" visited tracker |
 
 ---
 
@@ -510,6 +630,8 @@ bash codetracer_test.sh
 22  Route: params detection        (requires rg)
 23  Route: curl file parsing       (requires rg)
 ```
+
+Total: 180 tests across 23 suites.
 
 **Test helper contract:**
 - `run()` — executes codetracer, merges stderr, strips ANSI, always returns 0
@@ -589,3 +711,8 @@ codetracer X . --mode file
 | +zsh-array | `words=($tokens)` → `read -ra/-rA` branch; `${words[0]}` → for-loop+`_first` flag |
 | +rg-glob | `--include=` → `--glob=` throughout (rg has never had `--include`) |
 | +route | `--route` and `--action` flags; `trace_route()` + 10 sub-functions; Rails controller lifecycle tracing |
+| +model | `--model` flag; `trace_model()` + 7 extraction functions; model structure tracing |
+| +cross-class | `extract_cross_class_calls()` + `trace_call_chain()`; recursive cross-file call tracing with visited tracking |
+| +highlight | `--highlight` flag; pygmentize integration (gruvbox-dark, 16-color); batch highlighting for method bodies |
+| +curl-values | URL-decode curl query params; show original values as comments; deduplicate array params |
+| +new-init | `.new()` calls mapped to `initialize`; class summary fallback for DSL-only classes (serializers) |
