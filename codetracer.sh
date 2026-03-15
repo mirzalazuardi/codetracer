@@ -61,6 +61,12 @@ warn()    { echo -e "${YELLOW}  ⚠${RESET}  $1"; }
 hit()     { echo -e "${MAGENTA}  ●${RESET} $1"; }
 section() { echo -e "\n${BOLD}${BLUE}[$1]${RESET}"; }
 
+# URL-decode a string: %5B → [, %5D → ], %20 → space, etc.
+urldecode() {
+  local encoded="$1"
+  printf '%b' "${encoded//%/\\x}"
+}
+
 require() {
   for cmd in "$@"; do
     command -v "$cmd" &>/dev/null || { warn "Missing: $cmd (some features disabled)"; }
@@ -1174,8 +1180,13 @@ extract_cross_class_calls() {
         gsub(/\.[a-z_]+$/, "", cls)
         mtd = call
         gsub(/.*\./, "", mtd)
+        # Map .new to initialize
+        if (mtd == "new") {
+          print cls " initialize " NR
+          next
+        }
         # Skip common ActiveRecord/Ruby methods that are not worth following
-        skip_methods = "new find find_by where create update destroy delete all first last count includes joins order limit select pluck group sum transaction save find_or_initialize_by find_or_create_by find_by_id exists present blank nil try respond_to is_a class name to_s to_i to_f freeze eql"
+        skip_methods = "find find_by where create update destroy delete all first last count includes joins order limit select pluck group sum transaction save find_or_initialize_by find_or_create_by find_by_id exists present blank nil try respond_to is_a class name to_s to_i to_f freeze eql"
         skip = 0
         n_skip = split(skip_methods, skip_arr, " ")
         for (si = 1; si <= n_skip; si++) {
@@ -1277,6 +1288,27 @@ trace_call_chain() {
 
     # Check if method exists in target file
     if ! rg -q "^\s*def\s+(self\.)?${mtd}" "$target_file" 2>/dev/null; then
+      # Method not found — show class summary (methods or DSL declarations)
+      local class_lines
+      class_lines=$(rg -n "^\s*(def\s+|attributes?\s+|has_many\s+|has_one\s+|belongs_to\s+|scope\s+|include\s+)" "$target_file" 2>/dev/null | head -15 || true)
+      if [[ -n "$class_lines" ]]; then
+        echo ""
+        section "${cls} (${rel_path})"
+        local cm_count cm_total
+        cm_total=$(echo "$class_lines" | wc -l | tr -d ' ')
+        cm_count=0
+        while IFS= read -r cm_line; do
+          cm_count=$((cm_count + 1))
+          local cm_lineno cm_content cm_is_last
+          cm_lineno=$(echo "$cm_line" | cut -d: -f1)
+          cm_content=$(echo "$cm_line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+          # Truncate long lines
+          [[ ${#cm_content} -gt 80 ]] && cm_content="${cm_content:0:77}..."
+          cm_is_last="false"
+          [[ $cm_count -eq $cm_total ]] && cm_is_last="true"
+          format_tree_line "$indent_depth" "$cm_is_last" "${CYAN}${cm_content}${RESET}" "$cm_lineno"
+        done <<< "$class_lines"
+      fi
       continue
     fi
 
@@ -1719,8 +1751,24 @@ parse_curl_file() {
   if echo "$path" | grep -q '?'; then
     query_string=$(echo "$path" | sed 's/.*?//')
     path=$(echo "$path" | sed 's/?.*//')
-    # Parse query params and store them
-    CURL_QUERY_PARAMS=$(echo "$query_string" | tr '&' '\n' | sed 's/=.*//' | tr '\n' ' ')
+    # Parse query params: deduplicate, decode, and show original encoded form as comment
+    CURL_QUERY_PARAMS=""
+    local _seen_params=""
+    while IFS= read -r _pkey; do
+      [[ -z "$_pkey" ]] && continue
+      # Skip duplicates
+      if echo "$_seen_params" | grep -qF "|${_pkey}|" 2>/dev/null; then
+        continue
+      fi
+      _seen_params="${_seen_params}|${_pkey}|"
+      local _decoded
+      _decoded=$(urldecode "$_pkey")
+      if [[ "$_decoded" != "$_pkey" ]]; then
+        CURL_QUERY_PARAMS+="${_decoded} ${DIM}# ${_pkey}${RESET} "
+      else
+        CURL_QUERY_PARAMS+="${_pkey} "
+      fi
+    done <<< "$(echo "$query_string" | tr '&' '\n' | sed 's/=.*//')"
   fi
 
   # Convert numeric path segments to :id (e.g., /orders/123/refund → /orders/:id/refund)
