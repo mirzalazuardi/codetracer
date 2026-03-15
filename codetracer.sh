@@ -1556,7 +1556,7 @@ parse_routes_file() {
 
   # Find resource that might contain this action
   # When namespace is present, find the resource within the namespace block
-  local resource_match
+  local resource_match=""
   if [[ -n "$namespace_prefix" ]]; then
     # Find namespace line number, then search for resources within that block
     local ns_line
