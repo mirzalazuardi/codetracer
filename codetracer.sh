@@ -61,9 +61,9 @@ warn()    { echo -e "${YELLOW}  ⚠${RESET}  $1"; }
 hit()     { echo -e "${MAGENTA}  ●${RESET} $1"; }
 section() { echo -e "\n${BOLD}${BLUE}[$1]${RESET}"; }
 
-# URL-decode a string: %5B → [, %5D → ], %20 → space, etc.
+# URL-decode a string: %5B → [, %5D → ], %20 → space, + → space, etc.
 urldecode() {
-  local encoded="$1"
+  local encoded="${1//+/ }"
   printf '%b' "${encoded//%/\\x}"
 }
 
@@ -1751,24 +1751,45 @@ parse_curl_file() {
   if echo "$path" | grep -q '?'; then
     query_string=$(echo "$path" | sed 's/.*?//')
     path=$(echo "$path" | sed 's/?.*//')
-    # Parse query params: deduplicate, decode, and show original encoded form as comment
+    # Parse query params: decode keys+values, merge array params, show values as comments
     CURL_QUERY_PARAMS=""
-    local _seen_params=""
-    while IFS= read -r _pkey; do
-      [[ -z "$_pkey" ]] && continue
-      # Skip duplicates
-      if echo "$_seen_params" | grep -qF "|${_pkey}|" 2>/dev/null; then
-        continue
-      fi
-      _seen_params="${_seen_params}|${_pkey}|"
-      local _decoded
-      _decoded=$(urldecode "$_pkey")
-      if [[ "$_decoded" != "$_pkey" ]]; then
-        CURL_QUERY_PARAMS+="${_decoded} ${DIM}# ${_pkey}${RESET} "
+    # First pass: decode all pairs into "decoded_key\tdecoded_value" lines
+    local _decoded_pairs=""
+    while IFS= read -r _pair; do
+      [[ -z "$_pair" ]] && continue
+      local _pkey _pval
+      _pkey="${_pair%%=*}"
+      _pval="${_pair#*=}"
+      [[ "$_pair" != *"="* ]] && _pval=""
+      _decoded_pairs+="$(urldecode "$_pkey")"$'\t'"$(urldecode "$_pval")"$'\n'
+    done <<< "$(echo "$query_string" | tr '&' '\n')"
+    # Second pass: awk to deduplicate keys and merge array values
+    local _merged
+    _merged=$(printf "%s" "$_decoded_pairs" | awk -F'\t' '
+      $1 != "" {
+        if ($1 in seen) {
+          vals[$1] = vals[$1] ", " $2
+        } else {
+          seen[$1] = 1
+          vals[$1] = $2
+          order[++n] = $1
+        }
+      }
+      END {
+        for (i = 1; i <= n; i++) {
+          k = order[i]
+          printf "%s\t%s\n", k, vals[k]
+        }
+      }
+    ')
+    while IFS=$'\t' read -r _k _v; do
+      [[ -z "$_k" ]] && continue
+      if [[ -n "$_v" ]]; then
+        CURL_QUERY_PARAMS+="${_k} ${DIM}# ${_v}${RESET} "
       else
-        CURL_QUERY_PARAMS+="${_pkey} "
+        CURL_QUERY_PARAMS+="${_k} "
       fi
-    done <<< "$(echo "$query_string" | tr '&' '\n' | sed 's/=.*//')"
+    done <<< "$_merged"
   fi
 
   # Convert numeric path segments to :id (e.g., /orders/123/refund → /orders/:id/refund)
