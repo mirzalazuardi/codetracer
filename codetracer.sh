@@ -1025,6 +1025,8 @@ find_model_file() {
 
 parse_model_input() {
   local input="$1"
+  # Strip arguments if provided: "Order#method(arg1, arg2)" → "Order#method"
+  input="${input%%(*}"
   if [[ "$input" =~ ^([A-Za-z:]+)#([a-z_]+[!?]?)$ ]]; then
     MODEL_CLASS="${BASH_REMATCH[1]}"
     MODEL_METHOD="${BASH_REMATCH[2]}"
