@@ -1152,12 +1152,61 @@ trace_call_chain() {
     target_file=$(find_ruby_class_file "$cls")
     [[ -z "$target_file" || ! -f "$target_file" ]] && continue
 
+    local rel_path="${target_file#$ROOT/}"
+
+    # Check if it's an Interactor Organizer (organize Class1, Class2, ...)
+    local organize_line
+    organize_line=$(rg -n "^\s*organize\s+" "$target_file" 2>/dev/null | head -1 || true)
+    if [[ -n "$organize_line" ]]; then
+      echo ""
+      section "${cls} [organizer] (${rel_path})"
+      local org_lineno org_content
+      org_lineno=$(echo "$organize_line" | cut -d: -f1)
+      org_content=$(echo "$organize_line" | cut -d: -f2- | sed 's/^[[:space:]]*organize[[:space:]]*//')
+      format_tree_line "$indent_depth" "true" "${MAGENTA}organize${RESET} ${org_content}" "$org_lineno"
+
+      # Follow each organized interactor
+      local organized_classes
+      organized_classes=$(echo "$org_content" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      while IFS= read -r sub_cls; do
+        [[ -z "$sub_cls" ]] && continue
+        local sub_visit="${sub_cls}#call"
+        if echo "$TRACE_VISITED" | grep -qF "$sub_visit" 2>/dev/null; then
+          continue
+        fi
+        TRACE_VISITED="${TRACE_VISITED} ${sub_visit}"
+
+        local sub_file
+        sub_file=$(find_ruby_class_file "$sub_cls")
+        [[ -z "$sub_file" || ! -f "$sub_file" ]] && continue
+
+        local sub_rel="${sub_file#$ROOT/}"
+        echo ""
+        section "${sub_cls}#call (${sub_rel})"
+
+        if rg -q "^\s*def\s+call" "$sub_file" 2>/dev/null; then
+          parse_action_body "$sub_file" "call" "$indent_depth" "" "true"
+          trace_call_chain "$sub_file" "call" $((current_depth + 1)) "$max_depth" "$indent_depth"
+        else
+          # Might be another organizer
+          local nested_org
+          nested_org=$(rg -n "^\s*organize\s+" "$sub_file" 2>/dev/null | head -1 || true)
+          if [[ -n "$nested_org" ]]; then
+            local n_lineno n_content
+            n_lineno=$(echo "$nested_org" | cut -d: -f1)
+            n_content=$(echo "$nested_org" | cut -d: -f2- | sed 's/^[[:space:]]*organize[[:space:]]*//')
+            format_tree_line "$indent_depth" "true" "${MAGENTA}organize${RESET} ${n_content}" "$n_lineno"
+          fi
+        fi
+      done <<< "$organized_classes"
+      continue
+    fi
+
     # Check if method exists in target file
     if ! rg -q "^\s*def\s+(self\.)?${mtd}" "$target_file" 2>/dev/null; then
       continue
     fi
 
-    local rel_path="${target_file#$ROOT/}"
     echo ""
     section "${cls}#${mtd} (${rel_path})"
 
@@ -2147,6 +2196,10 @@ trace_route() {
   [[ ${#AFTER_CALLBACKS[@]} -eq 0 ]] && action_is_last="true"
 
   parse_action_body "$CONTROLLER_FILE" "$ACTION" 1 ""
+
+  # Follow cross-class calls from the action
+  TRACE_VISITED="${CONTROLLER}#${ACTION}"
+  trace_call_chain "$CONTROLLER_FILE" "$ACTION" 1 "$ROUTE_DEPTH" 1
 
   # Output after_action callbacks
   local after_count=${#AFTER_CALLBACKS[@]}
