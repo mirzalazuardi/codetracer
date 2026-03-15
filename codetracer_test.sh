@@ -709,6 +709,45 @@ else
   assert_contains "maps to index action"            "OrdersController#index"               "$RT_GET"
 fi
 
+# ═══════════════════════════════════════════════════════════════
+suite "24 · Flag: --trace"
+# ═══════════════════════════════════════════════════════════════
+
+RAILS_FIXTURES="$FIXTURES/rails_app"
+
+# Test --trace none (default) - should NOT trace/expand cross-class calls
+TRACE_NONE=$(run --route "POST /orders/:id/refund" "$RAILS_FIXTURES" --trace none)
+
+assert_contains "trace none shows route header"      "trace: none"                  "$TRACE_NONE"
+# RefundService.call is in the action body, but we shouldn't trace INTO RefundService
+assert_not_contains "trace none no traced section"   "RefundService#"               "$TRACE_NONE"
+
+# Test --trace cross - should trace cross-class calls (e.g., RefundService.call)
+TRACE_CROSS=$(run --route "POST /orders/:id/refund" "$RAILS_FIXTURES" --trace cross)
+
+assert_contains "trace cross shows trace header"     "trace: cross"                 "$TRACE_CROSS"
+# Should show RefundService section (traced into the class)
+assert_contains "trace cross traces service"         "RefundService"                "$TRACE_CROSS"
+
+# Test --trace internal - test with products controller that has internal calls
+TRACE_INTERNAL=$(run --route "POST /products" "$RAILS_FIXTURES" --trace internal)
+
+assert_contains "trace internal shows trace header"  "trace: internal"              "$TRACE_INTERNAL"
+assert_contains "trace internal shows internal tag"  "internal"                     "$TRACE_INTERNAL"
+
+# Test --trace all - should show both internal + cross-class
+TRACE_ALL=$(run --route "POST /products" "$RAILS_FIXTURES" --trace all)
+
+assert_contains "trace all shows trace header"       "trace: all"                   "$TRACE_ALL"
+assert_contains "trace all shows internal calls"     "validate_input"               "$TRACE_ALL"
+assert_contains "trace all shows cross-class"        "InventoryService"             "$TRACE_ALL"
+
+# Test default (no --trace flag) behaves as none
+TRACE_DEFAULT=$(run --route "POST /orders/:id/refund" "$RAILS_FIXTURES")
+
+# Default should not trace into classes (no "RefundService#call" section)
+assert_not_contains "default no traced section"       "RefundService#"              "$TRACE_DEFAULT"
+
 # ══════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════

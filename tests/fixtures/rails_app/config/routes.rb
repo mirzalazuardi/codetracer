@@ -16,6 +16,8 @@ Rails.application.routes.draw do
 
   resources :users, only: [:index, :show, :create, :update]
 
+  resources :products, only: [:index, :show, :create, :update]
+
   # ── Namespaced routes ──────────────────────────────────────
   namespace :admin do
     resources :orders, only: [:index, :show, :update] do

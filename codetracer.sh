@@ -179,6 +179,14 @@ ${BOLD}ROUTE TRACING (Rails)${RESET}
                            Uses gruvbox-dark theme with 16-color terminal
                            Requires: pygmentize (pip install Pygments)
 
+  ${GREEN}--trace  <level>${RESET}        Call chain tracing level (default: none)
+                           ${CYAN}none${RESET}     = no call chain tracing
+                           ${CYAN}internal${RESET} = same-class method calls only
+                           ${CYAN}cross${RESET}    = cross-class calls only (e.g., ServiceClass.call)
+                           ${CYAN}all${RESET}      = both internal + cross-class
+
+                         Applies to: --mode route, flow, full
+
   Route trace output shows:
     ├── before_action callbacks (with origins: [ApplicationController], [Concern])
     ├── around_action callbacks
@@ -350,6 +358,7 @@ MODEL_CLASS=""
 MODEL_METHOD=""
 MODEL_DEPTH=3
 HIGHLIGHT=false
+TRACE_LEVEL="none"  # none | internal | cross | all
 
 # Curl parsing results (populated by parse_curl_file)
 CURL_VERB=""
@@ -385,6 +394,7 @@ while [[ $# -gt 0 ]]; do
     --depth)      ROUTE_DEPTH="$2"; MODEL_DEPTH="$2"; shift 2 ;;
     --async)      ASYNC_MODE="$2"; shift 2 ;;
     --highlight)  HIGHLIGHT=true; shift ;;
+    --trace)      TRACE_LEVEL="$2"; shift 2 ;;
     -*)           warn "Unknown option: $1"; shift ;;
     *)            ROOT="$1";        shift ;;
   esac
@@ -1199,6 +1209,73 @@ extract_cross_class_calls() {
   ' "$file" 2>/dev/null | sort -u || true
 }
 
+# ─── Extract internal method calls (same-class) from a method body ─
+# Returns lines like: method_name line_number
+extract_internal_calls() {
+  local file="$1"
+  local method_name="$2"
+
+  awk -v action="$method_name" '
+    BEGIN { in_method = 0; method_indent = -1 }
+    {
+      match($0, /^[ \t]*/)
+      curr_indent = RLENGTH
+    }
+    /^[ \t]*def (self\.)?[a-z_]+/ {
+      if (in_method == 0) {
+        mn = $0
+        gsub(/^[ \t]*def[ \t]+/, "", mn)
+        gsub(/^self\./, "", mn)
+        gsub(/[ \t\(].*/, "", mn)
+        if (mn == action) {
+          in_method = 1
+          method_indent = curr_indent
+          next
+        }
+      }
+    }
+    in_method == 1 {
+      if ($0 ~ /^[ \t]*end[ \t]*$/ && curr_indent <= method_indent) {
+        in_method = 0; next
+      }
+      if ($0 ~ /^[ \t]*def (self\.)?[a-z_]+/ && curr_indent <= method_indent) {
+        in_method = 0; next
+      }
+
+      line = $0
+      gsub(/^[ \t]+/, "", line)
+      # Skip comments
+      if (line ~ /^#/) next
+
+      # Skip lines that are purely control flow or assignments without calls
+      if (line ~ /^(if|unless|elsif|else|end|when|case|begin|rescue|ensure|raise|return|yield|break|next|redo|retry|super)[ \t]*$/) next
+
+      # Keywords and common methods to skip
+      skip_pat = "^(if|unless|elsif|else|end|when|case|begin|rescue|ensure|raise|return|yield|break|next|redo|retry|super|puts|print|p|pp|require|require_relative|include|extend|attr_reader|attr_writer|attr_accessor|private|protected|public|alias|alias_method|render|redirect_to|head|send_data|send_file|respond_to|format|params|session|cookies|flash|request|response|logger|Rails)$"
+
+      # Pattern: bare method call - word( at start or after operator/space
+      # Match: method_name(...) or self.method_name(...)
+      # Extract each potential internal call
+      tmp = line
+      while (match(tmp, /(^|[^.A-Za-z0-9_])(self\.)?([a-z_][a-z0-9_]*)\(/)) {
+        # Extract the method name
+        call = substr(tmp, RSTART, RLENGTH)
+        gsub(/^[^a-z_]*/, "", call)  # Remove leading non-alpha
+        gsub(/self\./, "", call)      # Remove self.
+        gsub(/\($/, "", call)         # Remove trailing (
+
+        # Skip if it matches skip pattern
+        if (call !~ skip_pat && length(call) > 1) {
+          print call " " NR
+        }
+
+        # Move past this match
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+    }
+  ' "$file" 2>/dev/null | sort -u || true
+}
+
 # ─── Recursive call chain tracer ──────────────────────────────
 # Tracks visited class#method to prevent infinite loops
 TRACE_VISITED=""
@@ -1213,9 +1290,50 @@ trace_call_chain() {
   # Depth check
   [[ $current_depth -ge $max_depth ]] && return
 
-  # Get cross-class calls
-  local calls
-  calls=$(extract_cross_class_calls "$file" "$method_name")
+  # Get cross-class calls based on TRACE_LEVEL
+  local calls=""
+  if [[ "$TRACE_LEVEL" == "cross" || "$TRACE_LEVEL" == "all" ]]; then
+    calls=$(extract_cross_class_calls "$file" "$method_name")
+  fi
+
+  # Get internal calls based on TRACE_LEVEL
+  local internal_calls=""
+  if [[ "$TRACE_LEVEL" == "internal" || "$TRACE_LEVEL" == "all" ]]; then
+    internal_calls=$(extract_internal_calls "$file" "$method_name")
+  fi
+
+  # Process internal calls first (same file)
+  if [[ -n "$internal_calls" ]]; then
+    local rel_path="${file#$ROOT/}"
+    while IFS= read -r int_line; do
+      local int_mtd int_lineno
+      int_mtd=$(echo "$int_line" | awk '{print $1}')
+      int_lineno=$(echo "$int_line" | awk '{print $2}')
+
+      # Skip if already visited
+      local int_visit_key="${file}#${int_mtd}"
+      if echo "$TRACE_VISITED" | grep -qF "$int_visit_key" 2>/dev/null; then
+        continue
+      fi
+      TRACE_VISITED="${TRACE_VISITED} ${int_visit_key}"
+
+      # Check if method exists in same file
+      if ! rg -q "^\s*def\s+(self\.)?${int_mtd}" "$file" 2>/dev/null; then
+        continue
+      fi
+
+      echo ""
+      section "${int_mtd} [internal] (${rel_path})"
+
+      # Show the method body
+      parse_action_body "$file" "$int_mtd" "$indent_depth" "" "true"
+
+      # Recurse deeper (within same file)
+      trace_call_chain "$file" "$int_mtd" $((current_depth + 1)) "$max_depth" "$indent_depth"
+    done <<< "$internal_calls"
+  fi
+
+  # Process cross-class calls (original behavior)
   [[ -z "$calls" ]] && return
 
   while IFS= read -r call_line; do
@@ -2444,9 +2562,11 @@ trace_route() {
 
   parse_action_body "$CONTROLLER_FILE" "$ACTION" 1 ""
 
-  # Follow cross-class calls from the action
-  TRACE_VISITED="${CONTROLLER}#${ACTION}"
-  trace_call_chain "$CONTROLLER_FILE" "$ACTION" 1 "$ROUTE_DEPTH" 1
+  # Follow call chain from the action (based on --trace level)
+  if [[ "$TRACE_LEVEL" != "none" ]]; then
+    TRACE_VISITED="${CONTROLLER}#${ACTION}"
+    trace_call_chain "$CONTROLLER_FILE" "$ACTION" 1 "$ROUTE_DEPTH" 1
+  fi
 
   # Output after_action callbacks
   local after_count=${#AFTER_CALLBACKS[@]}
@@ -2473,7 +2593,7 @@ if [[ "$MODE" == "route" ]]; then
   echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
   _hl_label=""
   [[ "$HIGHLIGHT" == "true" ]] && _hl_label="  ${DIM}highlight:${RESET} on"
-  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $ROUTE_DEPTH  ${DIM}async:${RESET} $ASYNC_MODE${_hl_label}"
+  echo -e "  ${DIM}root:${RESET} $ROOT  ${DIM}depth:${RESET} $ROUTE_DEPTH  ${DIM}async:${RESET} $ASYNC_MODE  ${DIM}trace:${RESET} $TRACE_LEVEL${_hl_label}"
 elif [[ "$MODE" == "model" ]]; then
   echo -e "\n${BOLD}${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}${CYAN}║      codetracer  ·  model trace                    ║${RESET}"
