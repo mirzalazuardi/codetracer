@@ -1017,6 +1017,158 @@ find_model_file() {
   fi
 }
 
+# ─── Find any Ruby class file (models, services, jobs, etc.) ───
+find_ruby_class_file() {
+  local name="$1"
+  local snake
+  snake=$(echo "$name" | sed 's/\([a-z0-9]\)\([A-Z]\)/\1_\2/g' | tr '[:upper:]' '[:lower:]')
+  local path
+  path=$(echo "$snake" | sed 's/::/\//g')
+
+  # Search in common Rails directories
+  local dirs=("app/models" "app/services" "app/interactors" "app/commands"
+              "app/jobs" "app/workers" "app/processors" "app/handlers"
+              "app/mailers" "app/generators" "lib")
+  local dir
+  for dir in "${dirs[@]}"; do
+    local file="$ROOT/${dir}/${path}.rb"
+    if [[ -f "$file" ]]; then
+      echo "$file"
+      return 0
+    fi
+  done
+
+  # Fallback: find anywhere under ROOT
+  find "$ROOT" -path "*/app/*${path}.rb" -type f 2>/dev/null | head -1 ||
+    find "$ROOT" -path "*/${path}.rb" -name "*.rb" -not -path "*/vendor/*" -not -path "*/node_modules/*" -type f 2>/dev/null | head -1
+}
+
+# ─── Extract cross-class method calls from a method body ───────
+# Returns lines like: ClassName::SubClass method_name line_number
+extract_cross_class_calls() {
+  local file="$1"
+  local method_name="$2"
+
+  awk -v action="$method_name" '
+    BEGIN { in_method = 0; method_indent = -1 }
+    {
+      match($0, /^[ \t]*/)
+      curr_indent = RLENGTH
+    }
+    /^[ \t]*def (self\.)?[a-z_]+/ {
+      if (in_method == 0) {
+        mn = $0
+        gsub(/^[ \t]*def[ \t]+/, "", mn)
+        gsub(/^self\./, "", mn)
+        gsub(/[ \t\(].*/, "", mn)
+        if (mn == action) {
+          in_method = 1
+          method_indent = curr_indent
+          next
+        }
+      }
+    }
+    in_method == 1 {
+      if ($0 ~ /^[ \t]*end[ \t]*$/ && curr_indent <= method_indent) {
+        in_method = 0; next
+      }
+      if ($0 ~ /^[ \t]*def (self\.)?[a-z_]+/ && curr_indent <= method_indent) {
+        in_method = 0; next
+      }
+
+      line = $0
+      gsub(/^[ \t]+/, "", line)
+      # Skip comments
+      if (line ~ /^#/) next
+
+      # Pattern: ClassName.new(...).method(...) → class=ClassName method=method
+      if (match(line, /[A-Z][a-zA-Z0-9_]*(::([A-Z][a-zA-Z0-9_]*))*\.new[^.]*\.[a-z_]+/)) {
+        call = substr(line, RSTART, RLENGTH)
+        # Extract class name (everything before .new)
+        cls = call
+        gsub(/\.new.*/, "", cls)
+        # Extract method after .new(...).<method>
+        mtd = call
+        gsub(/.*\.new[^.]*\./, "", mtd)
+        gsub(/[^a-z_].*/, "", mtd)
+        print cls " " mtd " " NR
+        next
+      }
+      # Pattern: ClassName.call/method(...) → class=ClassName method=call/method
+      if (match(line, /[A-Z][a-zA-Z0-9_]*(::([A-Z][a-zA-Z0-9_]*))*\.[a-z_]+/)) {
+        call = substr(line, RSTART, RLENGTH)
+        cls = call
+        gsub(/\.[a-z_]+$/, "", cls)
+        mtd = call
+        gsub(/.*\./, "", mtd)
+        # Skip common ActiveRecord/Ruby methods that are not worth following
+        skip_methods = "new find find_by where create update destroy delete all first last count includes joins order limit select pluck group sum transaction save find_or_initialize_by find_or_create_by find_by_id exists present blank nil try respond_to is_a class name to_s to_i to_f freeze eql"
+        skip = 0
+        n_skip = split(skip_methods, skip_arr, " ")
+        for (si = 1; si <= n_skip; si++) {
+          if (mtd == skip_arr[si]) { skip = 1; break }
+        }
+        if (skip) next
+        print cls " " mtd " " NR
+      }
+    }
+  ' "$file" 2>/dev/null | sort -u || true
+}
+
+# ─── Recursive call chain tracer ──────────────────────────────
+# Tracks visited class#method to prevent infinite loops
+TRACE_VISITED=""
+
+trace_call_chain() {
+  local file="$1"
+  local method_name="$2"
+  local current_depth="$3"
+  local max_depth="$4"
+  local indent_depth="$5"
+
+  # Depth check
+  [[ $current_depth -ge $max_depth ]] && return
+
+  # Get cross-class calls
+  local calls
+  calls=$(extract_cross_class_calls "$file" "$method_name")
+  [[ -z "$calls" ]] && return
+
+  while IFS= read -r call_line; do
+    local cls mtd lineno
+    cls=$(echo "$call_line" | awk '{print $1}')
+    mtd=$(echo "$call_line" | awk '{print $2}')
+    lineno=$(echo "$call_line" | awk '{print $3}')
+
+    # Skip if already visited (prevent infinite recursion)
+    local visit_key="${cls}#${mtd}"
+    if echo "$TRACE_VISITED" | grep -qF "$visit_key" 2>/dev/null; then
+      continue
+    fi
+    TRACE_VISITED="${TRACE_VISITED} ${visit_key}"
+
+    # Find the target file
+    local target_file
+    target_file=$(find_ruby_class_file "$cls")
+    [[ -z "$target_file" || ! -f "$target_file" ]] && continue
+
+    # Check if method exists in target file
+    if ! rg -q "^\s*def\s+(self\.)?${mtd}" "$target_file" 2>/dev/null; then
+      continue
+    fi
+
+    local rel_path="${target_file#$ROOT/}"
+    echo ""
+    section "${cls}#${mtd} (${rel_path})"
+
+    # Show the method body
+    parse_action_body "$target_file" "$mtd" "$indent_depth" "" "true"
+
+    # Recurse deeper
+    trace_call_chain "$target_file" "$mtd" $((current_depth + 1)) "$max_depth" "$indent_depth"
+  done <<< "$calls"
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  FEATURE — MODEL TRACING
 #  Traces Rails models: associations, validations, callbacks,
@@ -1211,6 +1363,11 @@ extract_model_methods() {
     # If depth allows, trace method body (parse_action_body prints its own def header)
     if [[ $MODEL_DEPTH -gt 1 ]]; then
       parse_action_body "$file" "$method_name" "$depth" "" "true"
+      # Follow cross-class calls when tracing a specific method
+      if [[ -n "$target_method" ]]; then
+        TRACE_VISITED="${MODEL_CLASS}#${method_name}"
+        trace_call_chain "$file" "$method_name" 1 "$MODEL_DEPTH" "$depth"
+      fi
     else
       format_tree_line "$depth" "$is_last" "${CYAN}${method_sig}${RESET}" "$lineno"
     fi
