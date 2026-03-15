@@ -1662,17 +1662,21 @@ parse_action_body() {
       curr_indent = RLENGTH
     }
 
-    /^[ \t]*def [a-z_]+/ {
+    /^[ \t]*def (self\.)?[a-z_]+/ {
       if (in_method == 0) {
-        # Extract method name
+        # Extract method name (strip self. prefix for matching)
         method_name = original_line
         gsub(/^[ \t]*def[ \t]+/, "", method_name)
-        gsub(/[ \t\(].*/, "", method_name)
+        # Preserve self. for display but match without it
+        display_name = method_name
+        gsub(/[ \t\(].*/, "", display_name)
+        match_name = display_name
+        gsub(/^self\./, "", match_name)
 
-        if (method_name == action) {
+        if (match_name == action) {
           in_method = 1
           method_indent = curr_indent
-          print prefix tree_branch " " cyan "def " action reset "  " dim ":" NR reset
+          print prefix tree_branch " " cyan "def " display_name reset "  " dim ":" NR reset
           next
         }
       }
@@ -1687,7 +1691,7 @@ parse_action_body() {
       }
 
       # Check for next method start (means current method ended without explicit end)
-      if (original_line ~ /^[ \t]*def [a-z_]+/ && curr_indent <= method_indent) {
+      if (original_line ~ /^[ \t]*def (self\.)?[a-z_]+/ && curr_indent <= method_indent) {
         in_method = 0
         next
       }
